@@ -3,7 +3,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { Client, GatewayIntentBits } = require("discord.js");
-const { WebSocketProvider, Contract } = require("ethers");
+const { WebSocketProvider, Contract, getAddress } = require("ethers");
 
 // Load config
 const configPath = path.join(__dirname, "config.json");
@@ -46,8 +46,8 @@ async function startWatchers() {
       console.log(`Watching ERC721: ${col.name}`);
 
       contract.on("Transfer", async (from, to, tokenId, event) => {
-        if (from.toLowerCase() !== ZERO_ADDRESS) return;
-        await handleMint(col, "erc721", contract, tokenId, event);
+        if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
+        await handleMint(col, "erc721", contract, tokenId, event, to, 1);
       });
 
     } else if (col.standard.toLowerCase() === "erc1155") {
@@ -55,14 +55,14 @@ async function startWatchers() {
       console.log(`Watching ERC1155: ${col.name}`);
 
       contract.on("TransferSingle", async (op, from, to, id, value, event) => {
-        if (from.toLowerCase() !== ZERO_ADDRESS) return;
-        await handleMint(col, "erc1155", contract, id, event);
+        if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
+        await handleMint(col, "erc1155", contract, id, event, to, value);
       });
 
       contract.on("TransferBatch", async (op, from, to, ids, values, event) => {
-        if (from.toLowerCase() !== ZERO_ADDRESS) return;
-        for (let id of ids) {
-          await handleMint(col, "erc1155", contract, id, event);
+        if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
+        for (let i = 0; i < ids.length; i++) {
+          await handleMint(col, "erc1155", contract, ids[i], event, to, values[i]);
         }
       });
     }
@@ -70,12 +70,22 @@ async function startWatchers() {
 }
 
 // Main mint handler
-async function handleMint(collection, standard, contract, tokenId, event) {
+async function handleMint(collection, standard, contract, tokenId, event, to, quantity) {
   const tokenIdStr = tokenId.toString();
   const metadata = await loadMetadata(standard, contract, tokenId);
 
   const title = metadata?.name || `${collection.name} #${tokenIdStr}`;
   const artist = collection.artist || "Unknown";
+
+  // Resolve ENS or shorten address
+  let minter = to;
+  try {
+    const ens = await provider.lookupAddress(getAddress(to));
+    if (ens) minter = ens;
+    else minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
+  } catch {
+    minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
+  }
 
   // Try to resolve an image URL from metadata
   let imageUrl = null;
@@ -96,6 +106,8 @@ async function handleMint(collection, standard, contract, tokenId, event) {
     description: [
       `Collection: **${collection.name}**`,
       `Artist: **${artist}**`,
+      `Minting Wallet: **${minter}**`,
+      ...(standard === "erc1155" ? [`Quantity: **${quantity}**`] : []),
       ``,
       `[View on OpenSea](${openseaUrl})`
     ].join("\n"),
@@ -109,7 +121,6 @@ async function handleMint(collection, standard, contract, tokenId, event) {
   await channel.send({ embeds: [embed] });
   console.log(`Mint sent (with embed): ${title}`);
 }
-
 
 async function loadMetadata(standard, contract, tokenId) {
   try {
@@ -143,4 +154,3 @@ function normalizeUri(uri) {
 }
 
 client.login(process.env.DISCORD_BOT_TOKEN);
-
