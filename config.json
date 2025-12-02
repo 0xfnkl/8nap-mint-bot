@@ -1,0 +1,29 @@
+{
+  "discordChannelId": "1445238979937964154",
+  "collections": [
+    {
+      "name": "8NAP Art Cards",
+      "artist": "8NAP ART",
+      "standard": "erc1155",
+      "contractAddress": "0x43bF691da198b5d43d500768957a7660707A6531"
+    },
+    {
+      "name": "Surreal Sky",
+      "artist": "MACBETH",
+      "standard": "erc721",
+      "contractAddress": "0x9551Ec1997Ad76fdf84240B7d5B4a5EDab829a19"
+    },
+    {
+      "name": "Metamorphosis",
+      "artist": "RedruM",
+      "standard": "erc721",
+      "contractAddress": "0xD27Ca58bc4f70E95a7f193965AE60ffCE0D46A87"
+    },
+    {
+      "name": "Issues",
+      "artist": "DeltaSauce",
+      "standard": "erc721",
+      "contractAddress": "0xbe27770b0263133B9D3A1D4c7C2760007B94e37f"
+    }
+  ]
+}
