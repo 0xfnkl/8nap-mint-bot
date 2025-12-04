@@ -2,8 +2,8 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-const { Client, GatewayIntentBits } = require("discord.js");
-const { WebSocketProvider, Contract, getAddress } = require("ethers");
+const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const { WebSocketProvider, Contract, getAddress, formatEther } = require("ethers");
 
 // Load config
 const configPath = path.join(__dirname, "config.json");
@@ -17,7 +17,11 @@ const provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
 // Minimal ABIs
 const ERC721_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-  "function tokenURI(uint256 tokenId) view returns (string)"
+  "function tokenURI(uint256 tokenId) view returns (string)",
+  "event NewBidPlaced((address payable bidder, uint256 amount) bid)",
+  "event PieceRevealed()",
+  "function currentTokenId() view returns (uint256)",
+  "function auctionEnded() view returns (bool)"
 ];
 
 const ERC1155_ABI = [
@@ -50,6 +54,24 @@ async function startWatchers() {
         await handleMint(col, "erc721", contract, tokenId, event, to, 1);
       });
 
+      if (["Issues", "Metamorphosis"].includes(col.name)) {
+        console.log(`Watching Auctions for: ${col.name}`);
+
+        contract.on("PieceRevealed", async (event) => {
+          const auctionEnded = await contract.auctionEnded();
+          if (auctionEnded) {
+            await handlePieceRevealedAfterEnd(col, contract, event);
+          } else {
+            await handleNewAuctionStarted(col, contract, event);
+          }
+        });
+
+        contract.on("NewBidPlaced", async (bid, event) => {
+          const { bidder, amount } = bid;
+          await handleNewBid(col, contract, bidder, amount, event);
+        });
+      }
+
     } else if (col.standard.toLowerCase() === "erc1155") {
       const contract = new Contract(col.contractAddress, ERC1155_ABI, provider);
       console.log(`Watching ERC1155: ${col.name}`);
@@ -77,7 +99,6 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
   const title = metadata?.name || `${collection.name} #${tokenIdStr}`;
   const artist = collection.artist || "Unknown";
 
-  // Resolve ENS or shorten address
   let minter = to;
   try {
     const ens = await provider.lookupAddress(getAddress(to));
@@ -87,7 +108,6 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
     minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
   }
 
-  // Try to resolve an image URL from metadata
   let imageUrl = null;
   if (metadata && metadata.image) {
     imageUrl = normalizeUri(metadata.image);
@@ -100,7 +120,6 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
 
   const channel = await client.channels.fetch(config.discordChannelId);
 
-  // Build an embed so Discord shows a big image preview
   const embed = {
     title: title,
     description: [
@@ -120,6 +139,125 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
 
   await channel.send({ embeds: [embed] });
   console.log(`Mint sent (with embed): ${title}`);
+}
+
+// New Auction Started
+async function handleNewAuctionStarted(collection, contract, event) {
+  const tokenId = await contract.currentTokenId();
+  const metadata = await loadMetadata("erc721", contract, tokenId);
+  const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
+
+  const tx = await event.getTransactionReceipt();
+  const revealer = tx.from;
+  let revealerDisplay = revealer;
+  try {
+    const ens = await provider.lookupAddress(getAddress(revealer));
+    if (ens) revealerDisplay = ens;
+    else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
+  } catch {}
+
+  const openingBid = collection.name === "Issues" ? "0.100" : "0.079";
+
+  const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+
+  const channel = await client.channels.fetch(config.auctionChannelId);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`New ${collection.name} Auction Started!`)
+    .setDescription([
+      `Artist: **${collection.artist}**`,
+      `Current Piece: #${tokenId.toString()}`,
+      `Opening Bid: **${openingBid} ETH**`,
+      `Bidder: **${revealerDisplay}**`,
+      ``,
+      `[View on 8NAP](${viewLink})`
+    ].join("\n"))
+    .setColor(0x00ff00) // green
+    .setTimestamp()
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  await channel.send({ embeds: [embed] });
+  console.log(`New auction started: ${collection.name} #${tokenId}`);
+}
+
+// New Bid Placed
+async function handleNewBid(collection, contract, bidder, amount, event) {
+  const tokenId = await contract.currentTokenId();
+  const metadata = await loadMetadata("erc721", contract, tokenId);
+  const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
+
+  let bidderDisplay = bidder;
+  try {
+    const ens = await provider.lookupAddress(getAddress(bidder));
+    if (ens) bidderDisplay = ens;
+    else bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
+  } catch {
+    bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
+  }
+
+  const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+
+  const channel = await client.channels.fetch(config.auctionChannelId);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`New Bid Placed`)
+    .setDescription([
+      `Collection: **${collection.name}**`,
+      `Piece: #${tokenId.toString()}`,
+      `Bidder: **${bidderDisplay}**`,
+      `Amount: **${formatEther(amount)} ETH**`,
+      ``,
+      `[View on 8NAP](${viewLink})`
+    ].join("\n"))
+    .setColor(0xff0000) // red
+    .setTimestamp()
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  await channel.send({ embeds: [embed] });
+  console.log(`Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
+}
+
+// Piece Revealed After Auction Ended
+async function handlePieceRevealedAfterEnd(collection, contract, event) {
+  const tokenId = await contract.currentTokenId();
+  const metadata = await loadMetadata("erc721", contract, tokenId);
+  const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
+
+  const tx = await event.getTransactionReceipt();
+  const revealer = tx.from;
+  let revealerDisplay = revealer;
+  try {
+    const ens = await provider.lookupAddress(getAddress(revealer));
+    if (ens) revealerDisplay = ens;
+    else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
+  } catch {}
+
+  const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+
+  const channel = await client.channels.fetch(config.auctionChannelId);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`Piece Revealed After Auction Ended`)
+    .setDescription([
+      `Collection: **${collection.name}**`,
+      `Artist: **${collection.artist}**`,
+      `Revealed by: **${revealerDisplay}**`,
+      `Piece #${tokenId.toString()} is now revealed and ready for the next auction!`,
+      ``,
+      `[View on 8NAP](${viewLink})`
+    ].join("\n"))
+    .setColor(0x9d00ff) // purple
+    .setTimestamp()
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  await channel.send({ embeds: [embed] });
+  console.log(`Post-auction reveal sent: ${collection.name} #${tokenId}`);
 }
 
 async function loadMetadata(standard, contract, tokenId) {
