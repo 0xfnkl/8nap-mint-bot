@@ -14,13 +14,13 @@ const CHAIN = "ethereum";
 
 const provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
 
-// Minimal ABIs
-const ERC721_ABI = [
+// Extended ABI for auction contracts
+const AUCTION_ERC721_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-  "function tokenURI(uint256 tokenId) view returns (string)",
-  "event NewBidPlaced((address payable bidder, uint256 amount) bid)",
   "event PieceRevealed()",
+  "event NewBidPlaced((address payable bidder, uint256 amount) bid)",
   "function currentTokenId() view returns (uint256)",
+  "function tokenURI(uint256 tokenId) view returns (string)",
   "function auctionEnded() view returns (bool)"
 ];
 
@@ -46,14 +46,17 @@ async function startWatchers() {
     if (!col.contractAddress || !col.standard) continue;
 
     if (col.standard.toLowerCase() === "erc721") {
-      const contract = new Contract(col.contractAddress, ERC721_ABI, provider);
+      const contract = new Contract(col.contractAddress, AUCTION_ERC721_ABI, provider);
       console.log(`Watching ERC721: ${col.name}`);
 
+      // Regular mints (skip auction collections — they mint via auction)
       contract.on("Transfer", async (from, to, tokenId, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
+        if (["Issues", "Metamorphosis"].includes(col.name)) return;
         await handleMint(col, "erc721", contract, tokenId, event, to, 1);
       });
 
+      // AUCTION COLLECTIONS ONLY
       if (["Issues", "Metamorphosis"].includes(col.name)) {
         console.log(`Watching Auctions for: ${col.name}`);
 
@@ -66,8 +69,8 @@ async function startWatchers() {
           }
         });
 
-        contract.on("NewBidPlaced", async (bid, event) => {
-          const { bidder, amount } = bid;
+        contract.on("NewBidPlaced", async (bidStruct, event) => {
+          const { bidder, amount } = bidStruct;
           await handleNewBid(col, contract, bidder, amount, event);
         });
       }
@@ -91,7 +94,7 @@ async function startWatchers() {
   }
 }
 
-// Main mint handler
+// Main mint handler — with price + fixed images
 async function handleMint(collection, standard, contract, tokenId, event, to, quantity) {
   const tokenIdStr = tokenId.toString();
   const metadata = await loadMetadata(standard, contract, tokenId);
@@ -99,6 +102,7 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
   const title = metadata?.name || `${collection.name} #${tokenIdStr}`;
   const artist = collection.artist || "Unknown";
 
+  // Resolve minter ENS or shorten
   let minter = to;
   try {
     const ens = await provider.lookupAddress(getAddress(to));
@@ -108,9 +112,24 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
     minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
   }
 
+  // Get image
   let imageUrl = null;
   if (metadata && metadata.image) {
     imageUrl = normalizeUri(metadata.image);
+  }
+
+  // Get mint price in ETH from the transaction (always show, even if 0)
+  const tx = await event.getTransaction();
+  const priceEth = formatEther(tx.value);
+  let priceLine = `Price: **${priceEth} ETH**`;
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
+    const data = await res.json();
+    const ethPriceUsd = data.ethereum.usd;
+    const priceUsd = (parseFloat(priceEth) * ethPriceUsd).toFixed(2);
+    priceLine = `Price: **${priceEth} ETH** ($${priceUsd})`;
+  } catch (e) {
+    console.log("CoinGecko failed, showing ETH only");
   }
 
   const block = await event.getBlock();
@@ -120,28 +139,27 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
 
   const channel = await client.channels.fetch(config.discordChannelId);
 
-  const embed = {
-    title: title,
-    description: [
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription([
       `Collection: **${collection.name}**`,
       `Artist: **${artist}**`,
       `Minting Wallet: **${minter}**`,
+      priceLine,
       ...(standard === "erc1155" ? [`Quantity: **${quantity}**`] : []),
       ``,
       `[View on OpenSea](${openseaUrl})`
-    ].join("\n"),
-    timestamp: new Date(timestamp * 1000).toISOString()
-  };
+    ].join("\n"))
+    .setTimestamp(new Date(timestamp * 1000))
+    .setFooter({ text: collection.name });
 
-  if (imageUrl) {
-    embed.image = { url: imageUrl };
-  }
+  if (imageUrl) embed.setImage(imageUrl);
 
   await channel.send({ embeds: [embed] });
-  console.log(`Mint sent (with embed): ${title}`);
+  console.log(`Mint sent: ${title} — ${priceEth} ETH`);
 }
 
-// New Auction Started
+// New Auction Started (green)
 async function handleNewAuctionStarted(collection, contract, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -172,7 +190,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
       ``,
       `[View on 8NAP](${viewLink})`
     ].join("\n"))
-    .setColor(0x00ff00) // green
+    .setColor(0x00ff00)
     .setTimestamp()
     .setFooter({ text: collection.name });
 
@@ -182,7 +200,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
   console.log(`New auction started: ${collection.name} #${tokenId}`);
 }
 
-// New Bid Placed
+// New Bid Placed (red)
 async function handleNewBid(collection, contract, bidder, amount, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -211,7 +229,7 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
       ``,
       `[View on 8NAP](${viewLink})`
     ].join("\n"))
-    .setColor(0xff0000) // red
+    .setColor(0xff0000)
     .setTimestamp()
     .setFooter({ text: collection.name });
 
@@ -221,7 +239,7 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   console.log(`Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
 }
 
-// Piece Revealed After Auction Ended
+// Piece Revealed After Auction Ended (purple)
 async function handlePieceRevealedAfterEnd(collection, contract, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -250,7 +268,7 @@ async function handlePieceRevealedAfterEnd(collection, contract, event) {
       ``,
       `[View on 8NAP](${viewLink})`
     ].join("\n"))
-    .setColor(0x9d00ff) // purple
+    .setColor(0x9d00ff)
     .setTimestamp()
     .setFooter({ text: collection.name });
 
@@ -286,9 +304,18 @@ function fix1155Uri(uri, tokenId) {
 
 function normalizeUri(uri) {
   if (uri.startsWith("ipfs://")) {
-    return `https://ipfs.io/ipfs/${uri.replace("ipfs://", "")}`;
+    return `https://ipfs.io/ipfs/${uri.slice(7)}`;
   }
-  return uri;
+  if (uri.startsWith("data:application/json;base64,")) {
+    const base64 = uri.slice(29); // remove the prefix
+    const json = Buffer.from(base64, "base64").toString("utf-8");
+    const data = JSON.parse(json);
+    if (data.image && data.image.startsWith("data:image")) {
+      return data.image;
+    }
+    return normalizeUri(data.image); // recursive in case it's ipfs inside
+  }
+  return uri; // normal https:// link
 }
 
 client.login(process.env.DISCORD_BOT_TOKEN);
