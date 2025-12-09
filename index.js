@@ -35,6 +35,20 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+// Event queue to handle out-of-order logs (fixes missed mints)
+const eventQueue = [];
+const processQueue = async () => {
+  while (eventQueue.length > 0) {
+    const event = eventQueue.shift();
+    try {
+      await event.handler(event.data);
+    } catch (e) {
+      console.error("Queue process error:", e);
+    }
+  }
+};
+setInterval(processQueue, 1000); // Process every second
+
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
   startWatchers().catch(err => console.error("Error during watchers:", err));
@@ -49,11 +63,11 @@ async function startWatchers() {
       const contract = new Contract(col.contractAddress, AUCTION_ERC721_ABI, provider);
       console.log(`Watching ERC721: ${col.name}`);
 
-      // Regular mints (skip auction collections — they mint via auction)
+      // Regular mints (skip auction collections)
       contract.on("Transfer", async (from, to, tokenId, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
         if (["Issues", "Metamorphosis"].includes(col.name)) return;
-        await handleMint(col, "erc721", contract, tokenId, event, to, 1);
+        eventQueue.push({ handler: () => handleMint(col, "erc721", contract, tokenId, event, to, 1), data: { col, standard: "erc721", contract, tokenId, event, to, quantity: 1 } });
       });
 
       // AUCTION COLLECTIONS ONLY
@@ -61,17 +75,19 @@ async function startWatchers() {
         console.log(`Watching Auctions for: ${col.name}`);
 
         contract.on("PieceRevealed", async (event) => {
-          const auctionEnded = await contract.auctionEnded();
-          if (auctionEnded) {
-            await handlePieceRevealedAfterEnd(col, contract, event);
-          } else {
-            await handleNewAuctionStarted(col, contract, event);
-          }
+          eventQueue.push({ handler: async () => {
+            const auctionEnded = await contract.auctionEnded();
+            if (auctionEnded) {
+              await handlePieceRevealedAfterEnd(col, contract, event);
+            } else {
+              await handleNewAuctionStarted(col, contract, event);
+            }
+          }, data: { col, contract, event } });
         });
 
         contract.on("NewBidPlaced", async (bidStruct, event) => {
           const { bidder, amount } = bidStruct;
-          await handleNewBid(col, contract, bidder, amount, event);
+          eventQueue.push({ handler: () => handleNewBid(col, contract, bidder, amount, event), data: { col, contract, bidder, amount, event } });
         });
       }
 
@@ -81,13 +97,13 @@ async function startWatchers() {
 
       contract.on("TransferSingle", async (op, from, to, id, value, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        await handleMint(col, "erc1155", contract, id, event, to, value);
+        eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, id, event, to, value), data: { col, standard: "erc1155", contract, id, event, to, quantity: value } });
       });
 
       contract.on("TransferBatch", async (op, from, to, ids, values, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
         for (let i = 0; i < ids.length; i++) {
-          await handleMint(col, "erc1155", contract, ids[i], event, to, values[i]);
+          eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, ids[i], event, to, values[i]), data: { col, standard: "erc1155", contract, id: ids[i], event, to, quantity: values[i] } });
         }
       });
     }
@@ -159,7 +175,7 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
   console.log(`Mint sent: ${title} — ${priceEth} ETH`);
 }
 
-// New Auction Started (green)
+// Auction handlers (unchanged from before)
 async function handleNewAuctionStarted(collection, contract, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -200,7 +216,6 @@ async function handleNewAuctionStarted(collection, contract, event) {
   console.log(`New auction started: ${collection.name} #${tokenId}`);
 }
 
-// New Bid Placed (red)
 async function handleNewBid(collection, contract, bidder, amount, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -239,7 +254,6 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   console.log(`Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
 }
 
-// Piece Revealed After Auction Ended (purple)
 async function handlePieceRevealedAfterEnd(collection, contract, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -307,15 +321,15 @@ function normalizeUri(uri) {
     return `https://ipfs.io/ipfs/${uri.slice(7)}`;
   }
   if (uri.startsWith("data:application/json;base64,")) {
-    const base64 = uri.slice(29); // remove the prefix
+    const base64 = uri.slice(29);
     const json = Buffer.from(base64, "base64").toString("utf-8");
     const data = JSON.parse(json);
     if (data.image && data.image.startsWith("data:image")) {
       return data.image;
     }
-    return normalizeUri(data.image); // recursive in case it's ipfs inside
+    return normalizeUri(data.image);
   }
-  return uri; // normal https:// link
+  return uri;
 }
 
 client.login(process.env.DISCORD_BOT_TOKEN);
