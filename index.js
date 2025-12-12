@@ -14,6 +14,16 @@ const CHAIN = "ethereum";
 
 const provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
 
+// Event queue to handle out-of-order logs (fixes missed mints)
+const eventQueue = [];
+const processQueue = async () => {
+  while (eventQueue.length > 0) {
+    const { handler } = eventQueue.shift();
+    try { await handler(); } catch (e) { console.error("Queue error:", e); }
+  }
+};
+setInterval(processQueue, 1000);
+
 // Extended ABI for auction contracts
 const AUCTION_ERC721_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
@@ -35,20 +45,6 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// Event queue to handle out-of-order logs (fixes missed mints)
-const eventQueue = [];
-const processQueue = async () => {
-  while (eventQueue.length > 0) {
-    const event = eventQueue.shift();
-    try {
-      await event.handler(event.data);
-    } catch (e) {
-      console.error("Queue process error:", e);
-    }
-  }
-};
-setInterval(processQueue, 1000); // Process every second
-
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
   startWatchers().catch(err => console.error("Error during watchers:", err));
@@ -63,14 +59,12 @@ async function startWatchers() {
       const contract = new Contract(col.contractAddress, AUCTION_ERC721_ABI, provider);
       console.log(`Watching ERC721: ${col.name}`);
 
-      // Regular mints (skip auction collections)
       contract.on("Transfer", async (from, to, tokenId, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        if (["Issues", "Metamorphosis"].includes(col.name)) return;
-        eventQueue.push({ handler: () => handleMint(col, "erc721", contract, tokenId, event, to, 1), data: { col, standard: "erc721", contract, tokenId, event, to, quantity: 1 } });
+        eventQueue.push({ handler: async () => await handleMint(col, "erc721", contract, tokenId, event, to, 1) });
       });
 
-      // AUCTION COLLECTIONS ONLY
+      // Auction watchers only for Issues and Metamorphosis
       if (["Issues", "Metamorphosis"].includes(col.name)) {
         console.log(`Watching Auctions for: ${col.name}`);
 
@@ -82,12 +76,12 @@ async function startWatchers() {
             } else {
               await handleNewAuctionStarted(col, contract, event);
             }
-          }, data: { col, contract, event } });
+          }});
         });
 
         contract.on("NewBidPlaced", async (bidStruct, event) => {
           const { bidder, amount } = bidStruct;
-          eventQueue.push({ handler: () => handleNewBid(col, contract, bidder, amount, event), data: { col, contract, bidder, amount, event } });
+          eventQueue.push({ handler: async () => await handleNewBid(col, contract, bidder, amount, event) });
         });
       }
 
@@ -97,20 +91,20 @@ async function startWatchers() {
 
       contract.on("TransferSingle", async (op, from, to, id, value, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, id, event, to, value), data: { col, standard: "erc1155", contract, id, event, to, quantity: value } });
+        eventQueue.push({ handler: async () => await handleMint(col, "erc1155", contract, id, event, to, value) });
       });
 
       contract.on("TransferBatch", async (op, from, to, ids, values, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
         for (let i = 0; i < ids.length; i++) {
-          eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, ids[i], event, to, values[i]), data: { col, standard: "erc1155", contract, id: ids[i], event, to, quantity: values[i] } });
+          eventQueue.push({ handler: async () => await handleMint(col, "erc1155", contract, ids[i], event, to, values[i]) });
         }
       });
     }
   }
 }
 
-// Main mint handler — with price + fixed images
+// Main mint handler
 async function handleMint(collection, standard, contract, tokenId, event, to, quantity) {
   const tokenIdStr = tokenId.toString();
   const metadata = await loadMetadata(standard, contract, tokenId);
@@ -118,7 +112,6 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
   const title = metadata?.name || `${collection.name} #${tokenIdStr}`;
   const artist = collection.artist || "Unknown";
 
-  // Resolve minter ENS or shorten
   let minter = to;
   try {
     const ens = await provider.lookupAddress(getAddress(to));
@@ -128,13 +121,11 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
     minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
   }
 
-  // Get image
   let imageUrl = null;
   if (metadata && metadata.image) {
     imageUrl = normalizeUri(metadata.image);
   }
 
-  // Get mint price in ETH from the transaction (always show, even if 0)
   const tx = await event.getTransaction();
   const priceEth = formatEther(tx.value);
   let priceLine = `Price: **${priceEth} ETH**`;
@@ -172,10 +163,10 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
   if (imageUrl) embed.setImage(imageUrl);
 
   await channel.send({ embeds: [embed] });
-  console.log(`Mint sent: ${title} — ${priceEth} ETH`);
+  console.log(`Mint sent (with embed): ${title}`);
 }
 
-// Auction handlers (unchanged from before)
+// New Auction Started
 async function handleNewAuctionStarted(collection, contract, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -216,6 +207,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
   console.log(`New auction started: ${collection.name} #${tokenId}`);
 }
 
+// New Bid Placed
 async function handleNewBid(collection, contract, bidder, amount, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
@@ -254,6 +246,7 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   console.log(`Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
 }
 
+// Piece Revealed After Auction Ended
 async function handlePieceRevealedAfterEnd(collection, contract, event) {
   const tokenId = await contract.currentTokenId();
   const metadata = await loadMetadata("erc721", contract, tokenId);
