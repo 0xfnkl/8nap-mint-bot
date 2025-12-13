@@ -235,7 +235,6 @@ async function startWatchers() {
 
       contract.on("Transfer", async (from, to, tokenId, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        if (["Issues", "Metamorphosis"].includes(col.name)) return;
         
         const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
         eventQueue.push({ 
