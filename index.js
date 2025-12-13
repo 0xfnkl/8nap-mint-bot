@@ -5,6 +5,12 @@ const path = require("path");
 const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 const { WebSocketProvider, Contract, getAddress, formatEther } = require("ethers");
 
+// Validate environment variables
+if (!process.env.DISCORD_BOT_TOKEN || !process.env.RPC_WEBSOCKET_URL) {
+  console.error('❌ Missing required environment variables: DISCORD_BOT_TOKEN or RPC_WEBSOCKET_URL');
+  process.exit(1);
+}
+
 // Load config
 const configPath = path.join(__dirname, "config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -12,17 +18,16 @@ const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const CHAIN = "ethereum";
 
-const provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
+// Provider with reconnection logic
+let provider;
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 10;
+const contracts = new Map(); // Store contract instances
 
-// Event queue to handle out-of-order logs
+// Event queue with deduplication
 const eventQueue = [];
-const processQueue = async () => {
-  while (eventQueue.length > 0) {
-    const { handler } = eventQueue.shift();
-    try { await handler(); } catch (e) { console.error("Queue error:", e); }
-  }
-};
-setInterval(processQueue, 1000);
+const processedEvents = new Set();
+let isProcessing = false;
 
 // ABIs
 const AUCTION_ERC721_ABI = [
@@ -45,60 +50,251 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+// Discord rate limiter
+const rateLimiter = {
+  lastSent: 0,
+  
+  async send(channel, message) {
+    const now = Date.now();
+    const timeSinceLastSent = now - this.lastSent;
+    
+    // Discord allows 5 messages per 5 seconds, so wait 1.2s between messages to be safe
+    if (timeSinceLastSent < 1200) {
+      await new Promise(r => setTimeout(r, 1200 - timeSinceLastSent));
+    }
+    
+    await channel.send(message);
+    this.lastSent = Date.now();
+  }
+};
+
+// ETH price cache (60 second cache)
+let cachedEthPrice = null;
+let cacheTime = 0;
+
+async function getEthPrice() {
+  if (Date.now() - cacheTime < 60000 && cachedEthPrice) {
+    return cachedEthPrice;
+  }
+  
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd", {
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    
+    const data = await res.json();
+    cachedEthPrice = data.ethereum.usd;
+    cacheTime = Date.now();
+    return cachedEthPrice;
+  } catch (e) {
+    console.log("⚠️  CoinGecko API failed, using cached/no USD price");
+    return cachedEthPrice;
+  }
+}
+
+// Retry wrapper for async functions
+async function retryAsync(fn, retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      console.log(`Retry ${i + 1}/${retries} failed:`, e.message);
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, delay * (i + 1)));
+    }
+  }
+}
+
+// Event queue processor with deduplication
+const processQueue = async () => {
+  if (isProcessing || eventQueue.length === 0) return;
+  isProcessing = true;
+  
+  while (eventQueue.length > 0) {
+    const { handler, eventId } = eventQueue.shift();
+    
+    // Skip duplicates
+    if (processedEvents.has(eventId)) {
+      console.log(`⏭️  Skipping duplicate event: ${eventId}`);
+      continue;
+    }
+    
+    processedEvents.add(eventId);
+    
+    // Prevent memory leak - keep only last 5000 events
+    if (processedEvents.size > 10000) {
+      const arr = Array.from(processedEvents);
+      processedEvents.clear();
+      arr.slice(-5000).forEach(id => processedEvents.add(id));
+      console.log("🧹 Cleaned up processed events cache");
+    }
+    
+    try { 
+      await handler(); 
+    } catch (e) { 
+      console.error("❌ Queue processing error:", e);
+    }
+  }
+  
+  isProcessing = false;
+};
+
+// Process queue more frequently
+setInterval(processQueue, 100);
+
+// Create provider with reconnection logic
+async function createProvider() {
+  try {
+    if (provider) {
+      try {
+        await provider.destroy();
+      } catch (e) {
+        console.log("Error destroying old provider:", e.message);
+      }
+    }
+
+    console.log("🔌 Connecting to WebSocket...");
+    provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
+    
+    // WebSocket event handlers
+    provider._websocket.on('open', () => {
+      console.log("✅ WebSocket connected");
+      reconnectAttempts = 0;
+    });
+
+    provider._websocket.on('close', (code, reason) => {
+      console.error(`❌ WebSocket closed (code: ${code}, reason: ${reason})`);
+      handleReconnect();
+    });
+    
+    provider._websocket.on('error', (err) => {
+      console.error('❌ WebSocket error:', err.message);
+    });
+    
+    // Wait for connection to be ready
+    await provider.getNetwork();
+    
+    // Reattach listeners after reconnect
+    await startWatchers();
+    
+    console.log("✅ Provider ready and watchers started");
+  } catch (error) {
+    console.error("❌ Failed to create provider:", error.message);
+    handleReconnect();
+  }
+}
+
+function handleReconnect() {
+  if (reconnectAttempts >= MAX_RECONNECT) {
+    console.error(`❌ Max reconnection attempts (${MAX_RECONNECT}) reached. Exiting.`);
+    process.exit(1);
+  }
+  
+  reconnectAttempts++;
+  const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
+  console.log(`🔄 Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT})...`);
+  
+  setTimeout(() => {
+    createProvider().catch(err => {
+      console.error("❌ Reconnection failed:", err.message);
+    });
+  }, delay);
+}
+
 client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  startWatchers().catch(err => console.error("Error during watchers:", err));
+  console.log(`✅ Discord bot logged in as ${client.user.tag}`);
+  createProvider().catch(err => {
+    console.error("❌ Error during initial connection:", err);
+    process.exit(1);
+  });
 });
 
 // Start watchers for each collection
 async function startWatchers() {
+  // Clear old contracts
+  for (const [addr, contract] of contracts.entries()) {
+    try {
+      contract.removeAllListeners();
+    } catch (e) {
+      console.log("Error removing listeners:", e.message);
+    }
+  }
+  contracts.clear();
+
   for (const col of config.collections) {
     if (!col.contractAddress || !col.standard) continue;
 
     if (col.standard.toLowerCase() === "erc721") {
       const contract = new Contract(col.contractAddress, AUCTION_ERC721_ABI, provider);
-      console.log(`Watching ERC721: ${col.name}`);
+      contracts.set(col.contractAddress, contract);
+      console.log(`👀 Watching ERC721: ${col.name}`);
 
       contract.on("Transfer", async (from, to, tokenId, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
         if (["Issues", "Metamorphosis"].includes(col.name)) return;
-        eventQueue.push({ handler: () => handleMint(col, "erc721", contract, tokenId, event, to, 1) });
+        
+        const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
+        eventQueue.push({ 
+          eventId,
+          handler: () => handleMint(col, "erc721", contract, tokenId, event, to, 1) 
+        });
       });
 
       // Auction watchers only for Issues and Metamorphosis
       if (["Issues", "Metamorphosis"].includes(col.name)) {
-        console.log(`Watching Auctions for: ${col.name}`);
+        console.log(`🎯 Watching Auctions for: ${col.name}`);
 
         contract.on("PieceRevealed", async (event) => {
-          eventQueue.push({ handler: async () => {
-            const auctionEnded = await contract.auctionEnded();
-            if (auctionEnded) {
-              await handlePieceRevealedAfterEnd(col, contract, event);
-            } else {
-              await handleNewAuctionStarted(col, contract, event);
+          const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
+          eventQueue.push({ 
+            eventId,
+            handler: async () => {
+              const auctionEnded = await contract.auctionEnded();
+              if (auctionEnded) {
+                await handlePieceRevealedAfterEnd(col, contract, event);
+              } else {
+                await handleNewAuctionStarted(col, contract, event);
+              }
             }
-          }});
+          });
         });
 
         contract.on("NewBidPlaced", async (bidStruct, event) => {
           const { bidder, amount } = bidStruct;
-          eventQueue.push({ handler: () => handleNewBid(col, contract, bidder, amount, event) });
+          const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
+          eventQueue.push({ 
+            eventId,
+            handler: () => handleNewBid(col, contract, bidder, amount, event) 
+          });
         });
       }
 
     } else if (col.standard.toLowerCase() === "erc1155") {
       const contract = new Contract(col.contractAddress, ERC1155_ABI, provider);
-      console.log(`Watching ERC1155: ${col.name}`);
+      contracts.set(col.contractAddress, contract);
+      console.log(`👀 Watching ERC1155: ${col.name}`);
 
       contract.on("TransferSingle", async (op, from, to, id, value, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, id, event, to, value) });
+        const eventId = `${event.transactionHash}-${event.logIndex}-single`;
+        eventQueue.push({ 
+          eventId,
+          handler: () => handleMint(col, "erc1155", contract, id, event, to, value) 
+        });
       });
 
       contract.on("TransferBatch", async (op, from, to, ids, values, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
         for (let i = 0; i < ids.length; i++) {
-          eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, ids[i], event, to, values[i]) });
+          const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
+          eventQueue.push({ 
+            eventId,
+            handler: () => handleMint(col, "erc1155", contract, ids[i], event, to, values[i]) 
+          });
         }
       });
     }
@@ -107,183 +303,203 @@ async function startWatchers() {
 
 // Main mint handler
 async function handleMint(collection, standard, contract, tokenId, event, to, quantity) {
-  const tokenIdStr = tokenId.toString();
-  const metadata = await loadMetadata(standard, contract, tokenId);
-
-  const title = metadata?.name || `${collection.name} #${tokenIdStr}`;
-  const artist = collection.artist || "Unknown";
-
-  let minter = to;
   try {
-    const ens = await provider.lookupAddress(getAddress(to));
-    if (ens) minter = ens;
-    else minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
-  } catch {
-    minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
+    const tokenIdStr = tokenId.toString();
+    console.log(`🎨 Processing mint: ${collection.name} #${tokenIdStr}`);
+    
+    const metadata = await retryAsync(() => loadMetadata(standard, contract, tokenId));
+
+    const title = metadata?.name || `${collection.name} #${tokenIdStr}`;
+    const artist = collection.artist || "Unknown";
+
+    let minter = to;
+    try {
+      const ens = await provider.lookupAddress(getAddress(to));
+      if (ens) minter = ens;
+      else minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
+    } catch {
+      minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
+    }
+
+    let imageUrl = null;
+    if (metadata && metadata.image) {
+      imageUrl = normalizeUri(metadata.image);
+    }
+
+    const tx = await event.getTransaction();
+    const priceEth = formatEther(tx.value);
+    let priceLine = `Price: **${priceEth} ETH**`;
+    
+    const ethPriceUsd = await getEthPrice();
+    if (ethPriceUsd) {
+      const priceUsd = (parseFloat(priceEth) * ethPriceUsd).toFixed(2);
+      priceLine = `Price: **${priceEth} ETH** ($${priceUsd})`;
+    }
+
+    const block = await event.getBlock();
+    const timestamp = block.timestamp;
+
+    const openseaUrl = `https://opensea.io/assets/${CHAIN}/${collection.contractAddress}/${tokenIdStr}`;
+
+    const channel = await client.channels.fetch(config.discordChannelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setDescription([
+        `Collection: **${collection.name}**`,
+        `Artist: **${artist}**`,
+        `Minting Wallet: **${minter}**`,
+        priceLine,
+        ...(standard === "erc1155" ? [`Quantity: **${quantity}**`] : []),
+        ``,
+        `[View on OpenSea](${openseaUrl})`
+      ].join("\n"))
+      .setTimestamp(new Date(timestamp * 1000))
+      .setFooter({ text: collection.name });
+
+    if (imageUrl) embed.setImage(imageUrl);
+
+    await rateLimiter.send(channel, { embeds: [embed] });
+    console.log(`✅ Mint sent: ${title} — ${priceEth} ETH`);
+  } catch (error) {
+    console.error(`❌ Error handling mint for ${collection.name}:`, error);
   }
-
-  let imageUrl = null;
-  if (metadata && metadata.image) {
-    imageUrl = normalizeUri(metadata.image);
-  }
-
-  const tx = await event.getTransaction();
-  const priceEth = formatEther(tx.value);
-  let priceLine = `Price: **${priceEth} ETH**`;
-  try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd");
-    const data = await res.json();
-    const ethPriceUsd = data.ethereum.usd;
-    const priceUsd = (parseFloat(priceEth) * ethPriceUsd).toFixed(2);
-    priceLine = `Price: **${priceEth} ETH** ($${priceUsd})`;
-  } catch (e) {
-    console.log("CoinGecko failed, showing ETH only");
-  }
-
-  const block = await event.getBlock();
-  const timestamp = block.timestamp;
-
-  const openseaUrl = `https://opensea.io/assets/${CHAIN}/${collection.contractAddress}/${tokenIdStr}`;
-
-  const channel = await client.channels.fetch(config.discordChannelId);
-
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription([
-      `Collection: **${collection.name}**`,
-      `Artist: **${artist}**`,
-      `Minting Wallet: **${minter}**`,
-      priceLine,
-      ...(standard === "erc1155" ? [`Quantity: **${quantity}**`] : []),
-      ``,
-      `[View on OpenSea](${openseaUrl})`
-    ].join("\n"))
-    .setTimestamp(new Date(timestamp * 1000))
-    .setFooter({ text: collection.name });
-
-  if (imageUrl) embed.setImage(imageUrl);
-
-  await channel.send({ embeds: [embed] });
-  console.log(`Mint sent: ${title} — ${priceEth} ETH`);
 }
 
 // New Auction Started
 async function handleNewAuctionStarted(collection, contract, event) {
-  const tokenId = await contract.currentTokenId();
-  const metadata = await loadMetadata("erc721", contract, tokenId);
-  const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
-
-  const tx = await event.getTransactionReceipt();
-  const revealer = tx.from;
-  let revealerDisplay = revealer;
   try {
-    const ens = await provider.lookupAddress(getAddress(revealer));
-    if (ens) revealerDisplay = ens;
-    else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
-  } catch {}
+    console.log(`🎯 New auction started: ${collection.name}`);
+    
+    const tokenId = await contract.currentTokenId();
+    const metadata = await retryAsync(() => loadMetadata("erc721", contract, tokenId));
+    const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
 
-  const openingBid = collection.name === "Issues" ? "0.100" : "0.079";
+    const tx = await event.getTransactionReceipt();
+    const revealer = tx.from;
+    let revealerDisplay = revealer;
+    try {
+      const ens = await provider.lookupAddress(getAddress(revealer));
+      if (ens) revealerDisplay = ens;
+      else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
+    } catch {}
 
-  const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const openingBid = collection.name === "Issues" ? "0.100" : "0.079";
+    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
 
-  const channel = await client.channels.fetch(config.auctionChannelId);
+    const channel = await client.channels.fetch(config.auctionChannelId);
 
-  const embed = new EmbedBuilder()
-    .setTitle(`New ${collection.name} Auction Started!`)
-    .setDescription([
-      `Artist: **${collection.artist}**`,
-      `Current Piece: #${tokenId.toString()}`,
-      `Opening Bid: **${openingBid} ETH**`,
-      `Bidder: **${revealerDisplay}**`,
-      ``,
-      `[View on 8NAP](${viewLink})`
-    ].join("\n"))
-    .setColor(0x00ff00)
-    .setTimestamp()
-    .setFooter({ text: collection.name });
+    const embed = new EmbedBuilder()
+      .setTitle(`New ${collection.name} Auction Started!`)
+      .setDescription([
+        `Artist: **${collection.artist}**`,
+        `Current Piece: #${tokenId.toString()}`,
+        `Opening Bid: **${openingBid} ETH**`,
+        `Bidder: **${revealerDisplay}**`,
+        ``,
+        `[View on 8NAP](${viewLink})`
+      ].join("\n"))
+      .setColor(0x00ff00)
+      .setTimestamp()
+      .setFooter({ text: collection.name });
 
-  if (imageUrl) embed.setImage(imageUrl);
+    if (imageUrl) embed.setImage(imageUrl);
 
-  await channel.send({ embeds: [embed] });
-  console.log(`New auction started: ${collection.name} #${tokenId}`);
+    await rateLimiter.send(channel, { embeds: [embed] });
+    console.log(`✅ New auction started: ${collection.name} #${tokenId}`);
+  } catch (error) {
+    console.error(`❌ Error handling auction start for ${collection.name}:`, error);
+  }
 }
 
 // New Bid Placed
 async function handleNewBid(collection, contract, bidder, amount, event) {
-  const tokenId = await contract.currentTokenId();
-  const metadata = await loadMetadata("erc721", contract, tokenId);
-  const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
-
-  let bidderDisplay = bidder;
   try {
-    const ens = await provider.lookupAddress(getAddress(bidder));
-    if (ens) bidderDisplay = ens;
-    else bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
-  } catch {
-    bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
+    console.log(`💰 New bid: ${collection.name}`);
+    
+    const tokenId = await contract.currentTokenId();
+    const metadata = await retryAsync(() => loadMetadata("erc721", contract, tokenId));
+    const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
+
+    let bidderDisplay = bidder;
+    try {
+      const ens = await provider.lookupAddress(getAddress(bidder));
+      if (ens) bidderDisplay = ens;
+      else bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
+    } catch {
+      bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
+    }
+
+    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+
+    const channel = await client.channels.fetch(config.auctionChannelId);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`New Bid Placed`)
+      .setDescription([
+        `Collection: **${collection.name}**`,
+        `Piece: #${tokenId.toString()}`,
+        `Bidder: **${bidderDisplay}**`,
+        `Amount: **${formatEther(amount)} ETH**`,
+        ``,
+        `[View on 8NAP](${viewLink})`
+      ].join("\n"))
+      .setColor(0xff0000)
+      .setTimestamp()
+      .setFooter({ text: collection.name });
+
+    if (imageUrl) embed.setImage(imageUrl);
+
+    await rateLimiter.send(channel, { embeds: [embed] });
+    console.log(`✅ Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
+  } catch (error) {
+    console.error(`❌ Error handling bid for ${collection.name}:`, error);
   }
-
-  const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
-
-  const channel = await client.channels.fetch(config.auctionChannelId);
-
-  const embed = new EmbedBuilder()
-    .setTitle(`New Bid Placed`)
-    .setDescription([
-      `Collection: **${collection.name}**`,
-      `Piece: #${tokenId.toString()}`,
-      `Bidder: **${bidderDisplay}**`,
-      `Amount: **${formatEther(amount)} ETH**`,
-      ``,
-      `[View on 8NAP](${viewLink})`
-    ].join("\n"))
-    .setColor(0xff0000)
-    .setTimestamp()
-    .setFooter({ text: collection.name });
-
-  if (imageUrl) embed.setImage(imageUrl);
-
-  await channel.send({ embeds: [embed] });
-  console.log(`Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
 }
 
 // Piece Revealed After Auction Ended
 async function handlePieceRevealedAfterEnd(collection, contract, event) {
-  const tokenId = await contract.currentTokenId();
-  const metadata = await loadMetadata("erc721", contract, tokenId);
-  const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
-
-  const tx = await event.getTransactionReceipt();
-  const revealer = tx.from;
-  let revealerDisplay = revealer;
   try {
-    const ens = await provider.lookupAddress(getAddress(revealer));
-    if (ens) revealerDisplay = ens;
-    else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
-  } catch {}
+    console.log(`🎨 Piece revealed after auction: ${collection.name}`);
+    
+    const tokenId = await contract.currentTokenId();
+    const metadata = await retryAsync(() => loadMetadata("erc721", contract, tokenId));
+    const imageUrl = metadata?.image ? normalizeUri(metadata.image) : null;
 
-  const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const tx = await event.getTransactionReceipt();
+    const revealer = tx.from;
+    let revealerDisplay = revealer;
+    try {
+      const ens = await provider.lookupAddress(getAddress(revealer));
+      if (ens) revealerDisplay = ens;
+      else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
+    } catch {}
 
-  const channel = await client.channels.fetch(config.auctionChannelId);
+    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
 
-  const embed = new EmbedBuilder()
-    .setTitle(`Piece Revealed After Auction Ended`)
-    .setDescription([
-      `Collection: **${collection.name}**`,
-      `Artist: **${collection.artist}**`,
-      `Revealed by: **${revealerDisplay}**`,
-      `Piece #${tokenId.toString()} is now revealed and ready for the next auction!`,
-      ``,
-      `[View on 8NAP](${viewLink})`
-    ].join("\n"))
-    .setColor(0x9d00ff)
-    .setTimestamp()
-    .setFooter({ text: collection.name });
+    const channel = await client.channels.fetch(config.auctionChannelId);
 
-  if (imageUrl) embed.setImage(imageUrl);
+    const embed = new EmbedBuilder()
+      .setTitle(`Piece Revealed After Auction Ended`)
+      .setDescription([
+        `Collection: **${collection.name}**`,
+        `Artist: **${collection.artist}**`,
+        `Revealed by: **${revealerDisplay}**`,
+        `Piece #${tokenId.toString()} is now revealed and ready for the next auction!`,
+        ``,
+        `[View on 8NAP](${viewLink})`
+      ].join("\n"))
+      .setColor(0x9d00ff)
+      .setTimestamp()
+      .setFooter({ text: collection.name });
 
-  await channel.send({ embeds: [embed] });
-  console.log(`Post-auction reveal sent: ${collection.name} #${tokenId}`);
+    if (imageUrl) embed.setImage(imageUrl);
+
+    await rateLimiter.send(channel, { embeds: [embed] });
+    console.log(`✅ Post-auction reveal sent: ${collection.name} #${tokenId}`);
+  } catch (error) {
+    console.error(`❌ Error handling post-auction reveal for ${collection.name}:`, error);
+  }
 }
 
 async function loadMetadata(standard, contract, tokenId) {
@@ -297,10 +513,17 @@ async function loadMetadata(standard, contract, tokenId) {
     }
 
     const url = normalizeUri(uri);
-    const res = await fetch(url);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    
     if (!res.ok) return null;
     return await res.json();
-  } catch {
+  } catch (e) {
+    console.log("⚠️  Failed to load metadata:", e.message);
     return null;
   }
 }
@@ -325,5 +548,27 @@ function normalizeUri(uri) {
   }
   return uri;
 }
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('🛑 Shutting down gracefully...');
+  await processQueue(); // Finish processing queue
+  if (provider) await provider.destroy();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('🛑 Shutting down gracefully...');
+  await processQueue();
+  if (provider) await provider.destroy();
+  process.exit(0);
+});
+
+// Heartbeat monitoring (every 5 minutes)
+setInterval(() => {
+  const queueSize = eventQueue.size;
+  const cacheSize = processedEvents.size;
+  console.log(`💓 Heartbeat: Queue=${queueSize}, Cache=${cacheSize}, Reconnects=${reconnectAttempts}`);
+}, 300000);
 
 client.login(process.env.DISCORD_BOT_TOKEN);
