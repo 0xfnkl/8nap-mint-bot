@@ -160,23 +160,22 @@ async function createProvider() {
     console.log("🔌 Connecting to WebSocket...");
     provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
     
-    // WebSocket event handlers
-    provider._websocket.on('open', () => {
-      console.log("✅ WebSocket connected");
-      reconnectAttempts = 0;
-    });
-
-    provider._websocket.on('close', (code, reason) => {
-      console.error(`❌ WebSocket closed (code: ${code}, reason: ${reason})`);
-      handleReconnect();
-    });
-    
-    provider._websocket.on('error', (err) => {
-      console.error('❌ WebSocket error:', err.message);
-    });
-    
-    // Wait for connection to be ready
+    // Wait for connection to be ready first
     await provider.getNetwork();
+    console.log("✅ WebSocket connected");
+    reconnectAttempts = 0;
+    
+    // Now attach WebSocket event handlers (after connection is established)
+    if (provider._websocket) {
+      provider._websocket.on('close', (code, reason) => {
+        console.error(`❌ WebSocket closed (code: ${code}, reason: ${reason})`);
+        handleReconnect();
+      });
+      
+      provider._websocket.on('error', (err) => {
+        console.error('❌ WebSocket error:', err.message);
+      });
+    }
     
     // Reattach listeners after reconnect
     await startWatchers();
@@ -184,6 +183,7 @@ async function createProvider() {
     console.log("✅ Provider ready and watchers started");
   } catch (error) {
     console.error("❌ Failed to create provider:", error.message);
+    console.error("Full error:", error);
     handleReconnect();
   }
 }
