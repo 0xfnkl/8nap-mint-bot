@@ -14,7 +14,7 @@ const CHAIN = "ethereum";
 
 const provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
 
-// Event queue to handle out-of-order logs (fixes missed mints)
+// Event queue to handle out-of-order logs
 const eventQueue = [];
 const processQueue = async () => {
   while (eventQueue.length > 0) {
@@ -24,7 +24,7 @@ const processQueue = async () => {
 };
 setInterval(processQueue, 1000);
 
-// Extended ABI for auction contracts
+// ABIs
 const AUCTION_ERC721_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
   "event PieceRevealed()",
@@ -61,7 +61,8 @@ async function startWatchers() {
 
       contract.on("Transfer", async (from, to, tokenId, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        eventQueue.push({ handler: async () => await handleMint(col, "erc721", contract, tokenId, event, to, 1) });
+        if (["Issues", "Metamorphosis"].includes(col.name)) return;
+        eventQueue.push({ handler: () => handleMint(col, "erc721", contract, tokenId, event, to, 1) });
       });
 
       // Auction watchers only for Issues and Metamorphosis
@@ -81,7 +82,7 @@ async function startWatchers() {
 
         contract.on("NewBidPlaced", async (bidStruct, event) => {
           const { bidder, amount } = bidStruct;
-          eventQueue.push({ handler: async () => await handleNewBid(col, contract, bidder, amount, event) });
+          eventQueue.push({ handler: () => handleNewBid(col, contract, bidder, amount, event) });
         });
       }
 
@@ -91,13 +92,13 @@ async function startWatchers() {
 
       contract.on("TransferSingle", async (op, from, to, id, value, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        eventQueue.push({ handler: async () => await handleMint(col, "erc1155", contract, id, event, to, value) });
+        eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, id, event, to, value) });
       });
 
       contract.on("TransferBatch", async (op, from, to, ids, values, event) => {
         if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
         for (let i = 0; i < ids.length; i++) {
-          eventQueue.push({ handler: async () => await handleMint(col, "erc1155", contract, ids[i], event, to, values[i]) });
+          eventQueue.push({ handler: () => handleMint(col, "erc1155", contract, ids[i], event, to, values[i]) });
         }
       });
     }
@@ -163,7 +164,7 @@ async function handleMint(collection, standard, contract, tokenId, event, to, qu
   if (imageUrl) embed.setImage(imageUrl);
 
   await channel.send({ embeds: [embed] });
-  console.log(`Mint sent (with embed): ${title}`);
+  console.log(`Mint sent: ${title} — ${priceEth} ETH`);
 }
 
 // New Auction Started
