@@ -24,10 +24,194 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 const contracts = new Map(); // Store contract instances
 
-// Event queue with deduplication
-const eventQueue = [];
-const processedEvents = new Set();
-let isProcessing = false;
+// Track last processed block for each collection to avoid reprocessing
+const lastProcessedBlock = new Map();
+
+// Polling backup - checks for missed mints every 2 minutes
+async function startPollingBackup() {
+  setInterval(async () => {
+    try {
+      console.log('🔍 Running polling backup check...');
+      
+      for (const col of config.collections) {
+        if (!col.contractAddress || !col.standard) continue;
+        
+        const contract = contracts.get(col.contractAddress);
+        if (!contract) continue;
+        
+        const currentBlock = await provider.getBlockNumber();
+        const lastBlock = lastProcessedBlock.get(col.contractAddress) || currentBlock - 100;
+        
+        // Only check last 100 blocks max to avoid too many RPC calls
+        const fromBlock = Math.max(lastBlock + 1, currentBlock - 100);
+        
+        if (fromBlock > currentBlock) continue;
+        
+        try {
+          if (col.standard.toLowerCase() === 'erc1155') {
+            // Check for TransferSingle events
+            const singleEvents = await contract.queryFilter(
+              contract.filters.TransferSingle(null, '0x0000000000000000000000000000000000000000'),
+              fromBlock,
+              currentBlock
+            );
+            
+            // Check for TransferBatch events
+            const batchEvents = await contract.queryFilter(
+              contract.filters.TransferBatch(null, '0x0000000000000000000000000000000000000000'),
+              fromBlock,
+              currentBlock
+            );
+            
+            if (singleEvents.length > 0 || batchEvents.length > 0) {
+              console.log(`📦 Polling found ${singleEvents.length + batchEvents.length} ERC1155 events for ${col.name}`);
+            }
+            
+            for (const event of singleEvents) {
+              const eventId = `${event.transactionHash}-${event.logIndex}-single`;
+              if (!processedEvents.has(eventId)) {
+                console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${event.args.id}`);
+                eventQueue.push({
+                  eventId,
+                  handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
+                });
+              }
+            }
+            
+            for (const event of batchEvents) {
+              const ids = event.args.ids;
+              const values = event.args.values;
+              for (let i = 0; i < ids.length; i++) {
+                const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
+                if (!processedEvents.has(eventId)) {
+                  console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${ids[i]}`);
+                  eventQueue.push({
+                    eventId,
+                    handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
+                  });
+                }
+              }
+            }
+          } else if (col.standard.toLowerCase() === 'erc721') {
+            // Skip Issues/Metamorphosis mints (handled by auction events)
+            if (["Issues", "Metamorphosis"].includes(col.name)) continue;
+            
+            const events = await contract.queryFilter(
+              contract.filters.Transfer('0x0000000000000000000000000000000000000000'),
+              fromBlock,
+              currentBlock
+            );
+            
+            if (events.length > 0) {
+              console.log(`📦 Polling found ${events.length} ERC721 events for ${col.name}`);
+            }
+            
+            for (const event of events) {
+              const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
+              if (!processedEvents.has(eventId)) {
+                console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${event.args.tokenId}`);
+                eventQueue.push({
+                  eventId,
+                  handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
+                });
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`Error polling ${col.name}:`, error.message);
+        }
+        
+        lastProcessedBlock.set(col.contractAddress, currentBlock);
+      }
+    } catch (error) {
+      console.error('❌ Error in polling backup:', error);
+    }
+  }, 120000); // Every 2 minutes
+}
+
+// Scan recent blocks on startup to catch mints during downtime
+async function scanRecentBlocks() {
+  try {
+    console.log('🔎 Scanning last 100 blocks for missed events during downtime...');
+    const currentBlock = await provider.getBlockNumber();
+    const fromBlock = currentBlock - 100;
+    
+    for (const col of config.collections) {
+      if (!col.contractAddress || !col.standard) continue;
+      
+      const contract = contracts.get(col.contractAddress);
+      if (!contract) continue;
+      
+      try {
+        if (col.standard.toLowerCase() === 'erc1155') {
+          const singleEvents = await contract.queryFilter(
+            contract.filters.TransferSingle(null, '0x0000000000000000000000000000000000000000'),
+            fromBlock,
+            currentBlock
+          );
+          
+          const batchEvents = await contract.queryFilter(
+            contract.filters.TransferBatch(null, '0x0000000000000000000000000000000000000000'),
+            fromBlock,
+            currentBlock
+          );
+          
+          if (singleEvents.length > 0 || batchEvents.length > 0) {
+            console.log(`📦 Found ${singleEvents.length + batchEvents.length} recent ${col.name} events`);
+          }
+          
+          for (const event of singleEvents) {
+            const eventId = `${event.transactionHash}-${event.logIndex}-single`;
+            eventQueue.push({
+              eventId,
+              handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
+            });
+          }
+          
+          for (const event of batchEvents) {
+            const ids = event.args.ids;
+            const values = event.args.values;
+            for (let i = 0; i < ids.length; i++) {
+              const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
+              eventQueue.push({
+                eventId,
+                handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
+              });
+            }
+          }
+        } else if (col.standard.toLowerCase() === 'erc721') {
+          if (["Issues", "Metamorphosis"].includes(col.name)) continue;
+          
+          const events = await contract.queryFilter(
+            contract.filters.Transfer('0x0000000000000000000000000000000000000000'),
+            fromBlock,
+            currentBlock
+          );
+          
+          if (events.length > 0) {
+            console.log(`📦 Found ${events.length} recent ${col.name} events`);
+          }
+          
+          for (const event of events) {
+            const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
+            eventQueue.push({
+              eventId,
+              handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`Error scanning ${col.name}:`, error.message);
+      }
+      
+      lastProcessedBlock.set(col.contractAddress, currentBlock);
+    }
+    
+    console.log('✅ Startup scan complete');
+  } catch (error) {
+    console.error('❌ Error scanning recent blocks:', error);
+  }
+}
 
 // ABIs
 const AUCTION_ERC721_ABI = [
@@ -179,6 +363,12 @@ async function createProvider() {
     
     // Reattach listeners after reconnect
     await startWatchers();
+    
+    // Scan for missed events on first connection
+    if (reconnectAttempts === 0) {
+      await scanRecentBlocks();
+      startPollingBackup();
+    }
     
     console.log("✅ Provider ready and watchers started");
   } catch (error) {
