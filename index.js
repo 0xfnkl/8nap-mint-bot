@@ -24,6 +24,11 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT = 10;
 const contracts = new Map(); // Store contract instances
 
+// Event queue with deduplication
+const eventQueue = [];
+const processedEvents = new Set();
+let isProcessing = false;
+
 // Track last processed block for each collection to avoid reprocessing
 const lastProcessedBlock = new Map();
 
