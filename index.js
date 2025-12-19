@@ -140,9 +140,9 @@ async function startPollingBackup() {
 // Scan recent blocks on startup to catch mints during downtime
 async function scanRecentBlocks() {
   try {
-    console.log('🔎 Scanning last 100 blocks for missed events during downtime...');
+    console.log('🔎 Scanning last 10 blocks for missed events during downtime...');
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = currentBlock - 100;
+    const fromBlock = currentBlock - 10; // Reduced to 10 blocks to avoid Alchemy rate limits
     
     for (const col of config.collections) {
       if (!col.contractAddress || !col.standard) continue;
@@ -170,10 +170,13 @@ async function scanRecentBlocks() {
           
           for (const event of singleEvents) {
             const eventId = `${event.transactionHash}-${event.logIndex}-single`;
-            eventQueue.push({
-              eventId,
-              handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
-            });
+            if (!processedEvents.has(eventId)) {
+              processedEvents.add(eventId);
+              eventQueue.push({
+                eventId,
+                handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
+              });
+            }
           }
           
           for (const event of batchEvents) {
@@ -181,10 +184,13 @@ async function scanRecentBlocks() {
             const values = event.args.values;
             for (let i = 0; i < ids.length; i++) {
               const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
-              eventQueue.push({
-                eventId,
-                handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
-              });
+              if (!processedEvents.has(eventId)) {
+                processedEvents.add(eventId);
+                eventQueue.push({
+                  eventId,
+                  handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
+                });
+              }
             }
           }
         } else if (col.standard.toLowerCase() === 'erc721') {
@@ -202,14 +208,17 @@ async function scanRecentBlocks() {
           
           for (const event of events) {
             const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
-            eventQueue.push({
-              eventId,
-              handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
-            });
+            if (!processedEvents.has(eventId)) {
+              processedEvents.add(eventId);
+              eventQueue.push({
+                eventId,
+                handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
+              });
+            }
           }
         }
       } catch (error) {
-        console.error(`Error scanning ${col.name}:`, error.message);
+        console.log(`⚠️  Could not scan ${col.name} - skipping (will be caught by polling backup)`);
       }
       
       lastProcessedBlock.set(col.contractAddress, currentBlock);
@@ -217,7 +226,7 @@ async function scanRecentBlocks() {
     
     console.log('✅ Startup scan complete');
   } catch (error) {
-    console.error('❌ Error scanning recent blocks:', error);
+    console.error('❌ Error scanning recent blocks:', error.message);
   }
 }
 
@@ -402,7 +411,7 @@ function handleReconnect() {
   }, delay);
 }
 
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
   createProvider().catch(err => {
     console.error("❌ Error during initial connection:", err);
