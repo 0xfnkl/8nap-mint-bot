@@ -76,6 +76,7 @@ async function startPollingBackup() {
               const eventId = `${event.transactionHash}-${event.logIndex}-single`;
               if (!processedEvents.has(eventId)) {
                 console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${event.args.id}`);
+                processedEvents.add(eventId); // Mark immediately to prevent double-queueing
                 eventQueue.push({
                   eventId,
                   handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
@@ -90,6 +91,7 @@ async function startPollingBackup() {
                 const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
                 if (!processedEvents.has(eventId)) {
                   console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${ids[i]}`);
+                  processedEvents.add(eventId); // Mark immediately
                   eventQueue.push({
                     eventId,
                     handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
@@ -115,6 +117,7 @@ async function startPollingBackup() {
               const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
               if (!processedEvents.has(eventId)) {
                 console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${event.args.tokenId}`);
+                processedEvents.add(eventId); // Mark immediately
                 eventQueue.push({
                   eventId,
                   handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
@@ -306,13 +309,12 @@ const processQueue = async () => {
   while (eventQueue.length > 0) {
     const { handler, eventId } = eventQueue.shift();
     
-    // Skip duplicates
+    // Mark as processed BEFORE handling to prevent race conditions
     if (processedEvents.has(eventId)) {
-      console.log(`⏭️  Skipping duplicate event: ${eventId}`);
+      console.log(`⏭️  Skipping duplicate event: ${eventId.slice(0, 20)}...`);
       continue;
     }
-    
-    processedEvents.add(eventId);
+    processedEvents.add(eventId); // Add BEFORE processing
     
     // Prevent memory leak - keep only last 5000 events
     if (processedEvents.size > 10000) {
