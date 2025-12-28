@@ -100,8 +100,10 @@ async function startPollingBackup() {
               }
             }
           } else if (col.standard.toLowerCase() === 'erc721') {
-            // Skip Issues/Metamorphosis mints (handled by auction events)
-            if (["Issues", "Metamorphosis"].includes(col.name)) continue;
+            if (["Issues", "Metamorphosis"].includes(col.name)) {
+              await enqueueMissedAuctionEvents(col, contract, fromBlock, currentBlock);
+              continue;
+            }
             
             const events = await contract.queryFilter(
               contract.filters.Transfer('0x0000000000000000000000000000000000000000'),
@@ -227,6 +229,65 @@ async function scanRecentBlocks() {
     console.log('✅ Startup scan complete');
   } catch (error) {
     console.error('❌ Error scanning recent blocks:', error.message);
+  }
+}
+
+// Enqueue auction events that may have been missed during downtime or websocket hiccups
+async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlock) {
+  const MAX_RANGE = 10; // RPC free tier limit
+  const startBlock = Number(fromBlock);
+  const endBlock = Number(toBlock);
+
+  if (!Number.isFinite(startBlock) || !Number.isFinite(endBlock) || startBlock > endBlock) {
+    console.error(`Invalid block numbers when enqueueing auction events for ${collection.name}`);
+    return;
+  }
+
+  const chunkedRanges = [];
+  let cursor = startBlock;
+  while (cursor <= endBlock) {
+    const upper = Math.min(cursor + MAX_RANGE - 1, endBlock);
+    chunkedRanges.push([cursor, upper]);
+    cursor = upper + 1;
+  }
+
+  for (const [chunkStart, chunkEnd] of chunkedRanges) {
+    const revealedEvents = await contract.queryFilter(
+      contract.filters.PieceRevealed(),
+      chunkStart,
+      chunkEnd
+    );
+
+    for (const event of revealedEvents) {
+      const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
+      if (processedEvents.has(eventId)) continue;
+      processedEvents.add(eventId);
+      eventQueue.push({
+        eventId,
+        handler: () => handlePieceRevealed(collection, contract, event)
+      });
+    }
+  }
+
+  for (const [chunkStart, chunkEnd] of chunkedRanges) {
+    const bidEvents = await contract.queryFilter(
+      contract.filters.NewBidPlaced(),
+      chunkStart,
+      chunkEnd
+    );
+
+    for (const event of bidEvents) {
+      const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
+      if (processedEvents.has(eventId)) continue;
+      processedEvents.add(eventId);
+      const bidStruct = event.args?.bid || event.args?.[0];
+      const bidder = bidStruct?.bidder || bidStruct?.[0];
+      const amount = bidStruct?.amount || bidStruct?.[1];
+      eventQueue.push({
+        eventId,
+        handler: () => handleNewBid(collection, contract, bidder, amount, event)
+      });
+    }
   }
 }
 
@@ -684,6 +745,20 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   }
 }
 
+// Piece revealed event - decides whether this signals a new auction or a post-auction reveal
+async function handlePieceRevealed(collection, contract, event) {
+  try {
+    const ended = await contract.auctionEnded();
+    if (ended) {
+      await handlePieceRevealedAfterEnd(collection, contract, event);
+    } else {
+      await handleNewAuctionStarted(collection, contract, event);
+    }
+  } catch (error) {
+    console.error(`❌ Error handling PieceRevealed for ${collection.name}:`, error);
+  }
+}
+
 // Piece Revealed After Auction Ended
 async function handlePieceRevealedAfterEnd(collection, contract, event) {
   try {
@@ -800,7 +875,7 @@ process.on('SIGINT', async () => {
 
 // Heartbeat monitoring (every 5 minutes)
 setInterval(() => {
-  const queueSize = eventQueue.size;
+  const queueSize = eventQueue.length;
   const cacheSize = processedEvents.size;
   console.log(`💓 Heartbeat: Queue=${queueSize}, Cache=${cacheSize}, Reconnects=${reconnectAttempts}`);
 }, 300000);
