@@ -234,57 +234,43 @@ async function scanRecentBlocks() {
 
 // Enqueue auction events that may have been missed during downtime or websocket hiccups
 async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlock) {
-  const MAX_RANGE = 10; // RPC free tier limit
+  try {
+    const revealedEvents = await contract.queryFilter(
+      contract.filters.PieceRevealed(),
+      fromBlock,
+      toBlock
+    );
 
-  async function processRange(startBlock, endBlock) {
-    try {
-      const revealedEvents = await contract.queryFilter(
-        contract.filters.PieceRevealed(),
-        startBlock,
-        endBlock
-      );
-
-      for (const event of revealedEvents) {
-        const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
-        if (processedEvents.has(eventId)) continue;
-        processedEvents.add(eventId);
-        eventQueue.push({
-          eventId,
-          handler: () => handlePieceRevealed(collection, contract, event)
-        });
-      }
-
-      const bidEvents = await contract.queryFilter(
-        contract.filters.NewBidPlaced(),
-        startBlock,
-        endBlock
-      );
-
-      for (const event of bidEvents) {
-        const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
-        if (processedEvents.has(eventId)) continue;
-        processedEvents.add(eventId);
-        const bidStruct = event.args?.bid || event.args?.[0];
-        const bidder = bidStruct?.bidder || bidStruct?.[0];
-        const amount = bidStruct?.amount || bidStruct?.[1];
-        eventQueue.push({
-          eventId,
-          handler: () => handleNewBid(collection, contract, bidder, amount, event)
-        });
-      }
-    } catch (error) {
-      console.error(
-        `Error enqueueing auction events for ${collection.name} [${startBlock}-${endBlock}]:`,
-        error.message
-      );
+    for (const event of revealedEvents) {
+      const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
+      if (processedEvents.has(eventId)) continue;
+      processedEvents.add(eventId);
+      eventQueue.push({
+        eventId,
+        handler: () => handlePieceRevealed(collection, contract, event)
+      });
     }
-  }
 
-  let start = fromBlock;
-  while (start <= toBlock) {
-    const end = Math.min(start + MAX_RANGE - 1, toBlock);
-    await processRange(start, end);
-    start = end + 1;
+    const bidEvents = await contract.queryFilter(
+      contract.filters.NewBidPlaced(),
+      fromBlock,
+      toBlock
+    );
+
+    for (const event of bidEvents) {
+      const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
+      if (processedEvents.has(eventId)) continue;
+      processedEvents.add(eventId);
+      const bidStruct = event.args?.bid || event.args?.[0];
+      const bidder = bidStruct?.bidder || bidStruct?.[0];
+      const amount = bidStruct?.amount || bidStruct?.[1];
+      eventQueue.push({
+        eventId,
+        handler: () => handleNewBid(collection, contract, bidder, amount, event)
+      });
+    }
+  } catch (error) {
+    console.error(`Error enqueueing auction events for ${collection.name}:`, error.message);
   }
 }
 
