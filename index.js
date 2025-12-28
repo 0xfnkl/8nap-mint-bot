@@ -234,11 +234,28 @@ async function scanRecentBlocks() {
 
 // Enqueue auction events that may have been missed during downtime or websocket hiccups
 async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlock) {
-  try {
+  const MAX_RANGE = 10; // RPC free tier limit
+  const startBlock = Number(fromBlock);
+  const endBlock = Number(toBlock);
+
+  if (!Number.isFinite(startBlock) || !Number.isFinite(endBlock) || startBlock > endBlock) {
+    console.error(`Invalid block numbers when enqueueing auction events for ${collection.name}`);
+    return;
+  }
+
+  const chunkedRanges = [];
+  let cursor = startBlock;
+  while (cursor <= endBlock) {
+    const upper = Math.min(cursor + MAX_RANGE - 1, endBlock);
+    chunkedRanges.push([cursor, upper]);
+    cursor = upper + 1;
+  }
+
+  for (const [chunkStart, chunkEnd] of chunkedRanges) {
     const revealedEvents = await contract.queryFilter(
       contract.filters.PieceRevealed(),
-      fromBlock,
-      toBlock
+      chunkStart,
+      chunkEnd
     );
 
     for (const event of revealedEvents) {
@@ -250,11 +267,13 @@ async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlo
         handler: () => handlePieceRevealed(collection, contract, event)
       });
     }
+  }
 
+  for (const [chunkStart, chunkEnd] of chunkedRanges) {
     const bidEvents = await contract.queryFilter(
       contract.filters.NewBidPlaced(),
-      fromBlock,
-      toBlock
+      chunkStart,
+      chunkEnd
     );
 
     for (const event of bidEvents) {
@@ -269,8 +288,6 @@ async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlo
         handler: () => handleNewBid(collection, contract, bidder, amount, event)
       });
     }
-  } catch (error) {
-    console.error(`Error enqueueing auction events for ${collection.name}:`, error.message);
   }
 }
 
