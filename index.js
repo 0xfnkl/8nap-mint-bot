@@ -100,8 +100,10 @@ async function startPollingBackup() {
               }
             }
           } else if (col.standard.toLowerCase() === 'erc721') {
-            // Skip Issues/Metamorphosis mints (handled by auction events)
-            if (["Issues", "Metamorphosis"].includes(col.name)) continue;
+            if (["Issues", "Metamorphosis"].includes(col.name)) {
+              await enqueueMissedAuctionEvents(col, contract, fromBlock, currentBlock);
+              continue;
+            }
             
             const events = await contract.queryFilter(
               contract.filters.Transfer('0x0000000000000000000000000000000000000000'),
@@ -227,6 +229,65 @@ async function scanRecentBlocks() {
     console.log('✅ Startup scan complete');
   } catch (error) {
     console.error('❌ Error scanning recent blocks:', error.message);
+  }
+}
+
+// Enqueue auction events that may have been missed during downtime or websocket hiccups
+async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlock) {
+  const MAX_RANGE = 10; // RPC free tier limit
+  const startBlock = Number(fromBlock);
+  const endBlock = Number(toBlock);
+
+  if (!Number.isFinite(startBlock) || !Number.isFinite(endBlock) || startBlock > endBlock) {
+    console.error(`Invalid block numbers when enqueueing auction events for ${collection.name}`);
+    return;
+  }
+
+  const chunkedRanges = [];
+  let cursor = startBlock;
+  while (cursor <= endBlock) {
+    const upper = Math.min(cursor + MAX_RANGE - 1, endBlock);
+    chunkedRanges.push([cursor, upper]);
+    cursor = upper + 1;
+  }
+
+  for (const [chunkStart, chunkEnd] of chunkedRanges) {
+    const revealedEvents = await contract.queryFilter(
+      contract.filters.PieceRevealed(),
+      chunkStart,
+      chunkEnd
+    );
+
+    for (const event of revealedEvents) {
+      const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
+      if (processedEvents.has(eventId)) continue;
+      processedEvents.add(eventId);
+      eventQueue.push({
+        eventId,
+        handler: () => handlePieceRevealed(collection, contract, event)
+      });
+    }
+  }
+
+  for (const [chunkStart, chunkEnd] of chunkedRanges) {
+    const bidEvents = await contract.queryFilter(
+      contract.filters.NewBidPlaced(),
+      chunkStart,
+      chunkEnd
+    );
+
+    for (const event of bidEvents) {
+      const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
+      if (processedEvents.has(eventId)) continue;
+      processedEvents.add(eventId);
+      const bidStruct = event.args?.bid || event.args?.[0];
+      const bidder = bidStruct?.bidder || bidStruct?.[0];
+      const amount = bidStruct?.amount || bidStruct?.[1];
+      eventQueue.push({
+        eventId,
+        handler: () => handleNewBid(collection, contract, bidder, amount, event)
+      });
+    }
   }
 }
 
@@ -584,28 +645,19 @@ async function handleNewAuctionStarted(collection, contract, event) {
   try {
     console.log(`🎯 New auction started: ${collection.name}`);
     
-    const tokenId = await contract.currentTokenId();
-    const tokenIdStr = tokenId.toString();
-    
-    // Use 8NAP's S3 bucket for correct images
-    let imageUrl = null;
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
+
+    let revealerDisplay = "unknown";
+    try {
+      const tx = await event.getTransactionReceipt();
+      const revealer = tx.from;
+      if (revealer) revealerDisplay = await formatDisplayAddress(revealer);
+    } catch (error) {
+      console.log(`⚠️  Could not enrich revealer for ${collection.name} auction start:`, error.message);
     }
 
-    const tx = await event.getTransactionReceipt();
-    const revealer = tx.from;
-    let revealerDisplay = revealer;
-    try {
-      const ens = await provider.lookupAddress(getAddress(revealer));
-      if (ens) revealerDisplay = ens;
-      else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
-    } catch {}
-
     const openingBid = collection.name === "Issues" ? "0.100" : "0.079";
-    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const viewLink = getAuctionViewLink(collection);
 
     const channel = await client.channels.fetch(config.auctionChannelId);
 
@@ -613,7 +665,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
       .setTitle(`New ${collection.name} Auction Started!`)
       .setDescription([
         `Artist: **${collection.artist}**`,
-        `Current Piece: #${tokenId.toString()}`,
+        `Current Piece: #${tokenIdStr}`,
         `Opening Bid: **${openingBid} ETH**`,
         `Bidder: **${revealerDisplay}**`,
         ``,
@@ -626,7 +678,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
     if (imageUrl) embed.setImage(imageUrl);
 
     await rateLimiter.send(channel, { embeds: [embed] });
-    console.log(`✅ New auction started: ${collection.name} #${tokenId}`);
+    console.log(`✅ New auction started: ${collection.name} #${tokenIdStr}`);
   } catch (error) {
     console.error(`❌ Error handling auction start for ${collection.name}:`, error);
   }
@@ -637,27 +689,11 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   try {
     console.log(`💰 New bid: ${collection.name}`);
     
-    const tokenId = await contract.currentTokenId();
-    const tokenIdStr = tokenId.toString();
-    
-    // Use 8NAP's S3 bucket for correct images
-    let imageUrl = null;
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
-    }
+    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
 
-    let bidderDisplay = bidder;
-    try {
-      const ens = await provider.lookupAddress(getAddress(bidder));
-      if (ens) bidderDisplay = ens;
-      else bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
-    } catch {
-      bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
-    }
+    const bidderDisplay = await formatDisplayAddress(bidder);
 
-    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const viewLink = getAuctionViewLink(collection);
 
     const channel = await client.channels.fetch(config.auctionChannelId);
 
@@ -684,32 +720,42 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   }
 }
 
+// Piece revealed event - decides whether this signals a new auction or a post-auction reveal
+async function handlePieceRevealed(collection, contract, event) {
+  try {
+    let ended = false;
+    try {
+      ended = await contract.auctionEnded();
+    } catch (error) {
+      console.log(`⚠️  Could not verify auctionEnded for ${collection.name}:`, error.message);
+    }
+    if (ended) {
+      await handlePieceRevealedAfterEnd(collection, contract, event);
+    } else {
+      await handleNewAuctionStarted(collection, contract, event);
+    }
+  } catch (error) {
+    console.error(`❌ Error handling PieceRevealed for ${collection.name}:`, error);
+  }
+}
+
 // Piece Revealed After Auction Ended
 async function handlePieceRevealedAfterEnd(collection, contract, event) {
   try {
     console.log(`🎨 Piece revealed after auction: ${collection.name}`);
     
-    const tokenId = await contract.currentTokenId();
-    const tokenIdStr = tokenId.toString();
-    
-    // Use 8NAP's S3 bucket for correct images
-    let imageUrl = null;
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
+
+    let revealerDisplay = "unknown";
+    try {
+      const tx = await event.getTransactionReceipt();
+      const revealer = tx.from;
+      if (revealer) revealerDisplay = await formatDisplayAddress(revealer);
+    } catch (error) {
+      console.log(`⚠️  Could not enrich revealer for ${collection.name} post-auction reveal:`, error.message);
     }
 
-    const tx = await event.getTransactionReceipt();
-    const revealer = tx.from;
-    let revealerDisplay = revealer;
-    try {
-      const ens = await provider.lookupAddress(getAddress(revealer));
-      if (ens) revealerDisplay = ens;
-      else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
-    } catch {}
-
-    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const viewLink = getAuctionViewLink(collection);
 
     const channel = await client.channels.fetch(config.auctionChannelId);
 
@@ -783,6 +829,47 @@ function normalizeUri(uri) {
   return uri;
 }
 
+async function formatDisplayAddress(address) {
+  if (!address) return "unknown";
+  let display = `${address.slice(0, 6)}...${address.slice(-4)}`;
+  try {
+    const ens = await provider.lookupAddress(getAddress(address));
+    if (ens) display = ens;
+  } catch (error) {
+    // ENS lookup failures are non-blocking
+  }
+  return display;
+}
+
+async function getAuctionTokenDetails(collection, tokenIdFetcher) {
+  let tokenIdStr = "unknown";
+  try {
+    const tokenId = await tokenIdFetcher();
+    if (tokenId !== undefined && tokenId !== null) {
+      tokenIdStr = tokenId.toString();
+    }
+  } catch (error) {
+    console.log(`⚠️  Could not fetch tokenId for ${collection.name}:`, error.message);
+  }
+
+  let imageUrl = null;
+  if (tokenIdStr !== "unknown") {
+    if (collection.name === "Issues") {
+      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
+    } else if (collection.name === "Metamorphosis") {
+      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+    }
+  }
+
+  return { tokenIdStr, imageUrl };
+}
+
+function getAuctionViewLink(collection) {
+  return collection.name === "Issues"
+    ? "https://8nap.art/collection/issues"
+    : "https://8nap.art/collection/metamorphosis";
+}
+
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('🛑 Shutting down gracefully...');
@@ -800,7 +887,7 @@ process.on('SIGINT', async () => {
 
 // Heartbeat monitoring (every 5 minutes)
 setInterval(() => {
-  const queueSize = eventQueue.size;
+  const queueSize = eventQueue.length;
   const cacheSize = processedEvents.size;
   console.log(`💓 Heartbeat: Queue=${queueSize}, Cache=${cacheSize}, Reconnects=${reconnectAttempts}`);
 }, 300000);
