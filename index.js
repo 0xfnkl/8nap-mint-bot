@@ -645,28 +645,19 @@ async function handleNewAuctionStarted(collection, contract, event) {
   try {
     console.log(`🎯 New auction started: ${collection.name}`);
     
-    const tokenId = await contract.currentTokenId();
-    const tokenIdStr = tokenId.toString();
-    
-    // Use 8NAP's S3 bucket for correct images
-    let imageUrl = null;
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
+
+    let revealerDisplay = "unknown";
+    try {
+      const tx = await event.getTransactionReceipt();
+      const revealer = tx.from;
+      if (revealer) revealerDisplay = await formatDisplayAddress(revealer);
+    } catch (error) {
+      console.log(`⚠️  Could not enrich revealer for ${collection.name} auction start:`, error.message);
     }
 
-    const tx = await event.getTransactionReceipt();
-    const revealer = tx.from;
-    let revealerDisplay = revealer;
-    try {
-      const ens = await provider.lookupAddress(getAddress(revealer));
-      if (ens) revealerDisplay = ens;
-      else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
-    } catch {}
-
     const openingBid = collection.name === "Issues" ? "0.100" : "0.079";
-    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const viewLink = getAuctionViewLink(collection);
 
     const channel = await client.channels.fetch(config.auctionChannelId);
 
@@ -674,7 +665,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
       .setTitle(`New ${collection.name} Auction Started!`)
       .setDescription([
         `Artist: **${collection.artist}**`,
-        `Current Piece: #${tokenId.toString()}`,
+        `Current Piece: #${tokenIdStr}`,
         `Opening Bid: **${openingBid} ETH**`,
         `Bidder: **${revealerDisplay}**`,
         ``,
@@ -687,7 +678,7 @@ async function handleNewAuctionStarted(collection, contract, event) {
     if (imageUrl) embed.setImage(imageUrl);
 
     await rateLimiter.send(channel, { embeds: [embed] });
-    console.log(`✅ New auction started: ${collection.name} #${tokenId}`);
+    console.log(`✅ New auction started: ${collection.name} #${tokenIdStr}`);
   } catch (error) {
     console.error(`❌ Error handling auction start for ${collection.name}:`, error);
   }
@@ -698,27 +689,11 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
   try {
     console.log(`💰 New bid: ${collection.name}`);
     
-    const tokenId = await contract.currentTokenId();
-    const tokenIdStr = tokenId.toString();
-    
-    // Use 8NAP's S3 bucket for correct images
-    let imageUrl = null;
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
-    }
+    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
 
-    let bidderDisplay = bidder;
-    try {
-      const ens = await provider.lookupAddress(getAddress(bidder));
-      if (ens) bidderDisplay = ens;
-      else bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
-    } catch {
-      bidderDisplay = `${bidder.slice(0, 6)}...${bidder.slice(-4)}`;
-    }
+    const bidderDisplay = await formatDisplayAddress(bidder);
 
-    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const viewLink = getAuctionViewLink(collection);
 
     const channel = await client.channels.fetch(config.auctionChannelId);
 
@@ -748,7 +723,12 @@ async function handleNewBid(collection, contract, bidder, amount, event) {
 // Piece revealed event - decides whether this signals a new auction or a post-auction reveal
 async function handlePieceRevealed(collection, contract, event) {
   try {
-    const ended = await contract.auctionEnded();
+    let ended = false;
+    try {
+      ended = await contract.auctionEnded();
+    } catch (error) {
+      console.log(`⚠️  Could not verify auctionEnded for ${collection.name}:`, error.message);
+    }
     if (ended) {
       await handlePieceRevealedAfterEnd(collection, contract, event);
     } else {
@@ -764,27 +744,18 @@ async function handlePieceRevealedAfterEnd(collection, contract, event) {
   try {
     console.log(`🎨 Piece revealed after auction: ${collection.name}`);
     
-    const tokenId = await contract.currentTokenId();
-    const tokenIdStr = tokenId.toString();
-    
-    // Use 8NAP's S3 bucket for correct images
-    let imageUrl = null;
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
+
+    let revealerDisplay = "unknown";
+    try {
+      const tx = await event.getTransactionReceipt();
+      const revealer = tx.from;
+      if (revealer) revealerDisplay = await formatDisplayAddress(revealer);
+    } catch (error) {
+      console.log(`⚠️  Could not enrich revealer for ${collection.name} post-auction reveal:`, error.message);
     }
 
-    const tx = await event.getTransactionReceipt();
-    const revealer = tx.from;
-    let revealerDisplay = revealer;
-    try {
-      const ens = await provider.lookupAddress(getAddress(revealer));
-      if (ens) revealerDisplay = ens;
-      else revealerDisplay = `${revealer.slice(0, 6)}...${revealer.slice(-4)}`;
-    } catch {}
-
-    const viewLink = collection.name === "Issues" ? "https://8nap.art/collection/issues" : "https://8nap.art/collection/metamorphosis";
+    const viewLink = getAuctionViewLink(collection);
 
     const channel = await client.channels.fetch(config.auctionChannelId);
 
@@ -856,6 +827,47 @@ function normalizeUri(uri) {
     return normalizeUri(data.image);
   }
   return uri;
+}
+
+async function formatDisplayAddress(address) {
+  if (!address) return "unknown";
+  let display = `${address.slice(0, 6)}...${address.slice(-4)}`;
+  try {
+    const ens = await provider.lookupAddress(getAddress(address));
+    if (ens) display = ens;
+  } catch (error) {
+    // ENS lookup failures are non-blocking
+  }
+  return display;
+}
+
+async function getAuctionTokenDetails(collection, tokenIdFetcher) {
+  let tokenIdStr = "unknown";
+  try {
+    const tokenId = await tokenIdFetcher();
+    if (tokenId !== undefined && tokenId !== null) {
+      tokenIdStr = tokenId.toString();
+    }
+  } catch (error) {
+    console.log(`⚠️  Could not fetch tokenId for ${collection.name}:`, error.message);
+  }
+
+  let imageUrl = null;
+  if (tokenIdStr !== "unknown") {
+    if (collection.name === "Issues") {
+      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
+    } else if (collection.name === "Metamorphosis") {
+      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+    }
+  }
+
+  return { tokenIdStr, imageUrl };
+}
+
+function getAuctionViewLink(collection) {
+  return collection.name === "Issues"
+    ? "https://8nap.art/collection/issues"
+    : "https://8nap.art/collection/metamorphosis";
 }
 
 // Graceful shutdown
