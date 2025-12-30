@@ -3,783 +3,158 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
-const { WebSocketProvider, Contract, getAddress, formatEther } = require("ethers");
+const { ethers } = require("ethers");
 
-// Validate environment variables
-if (!process.env.DISCORD_BOT_TOKEN || !process.env.RPC_WEBSOCKET_URL) {
-  console.error('❌ Missing required environment variables: DISCORD_BOT_TOKEN or RPC_WEBSOCKET_URL');
-  process.exit(1);
-}
+// =========================
+// Config + Env validation
+// =========================
 
-// Load config
 const configPath = path.join(__dirname, "config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+if (!process.env.DISCORD_BOT_TOKEN) {
+  console.error("❌ Missing env var: DISCORD_BOT_TOKEN");
+  process.exit(1);
+}
+if (!process.env.RPC_HTTP_URL) {
+  console.error("❌ Missing env var: RPC_HTTP_URL (Alchemy HTTPS endpoint)");
+  process.exit(1);
+}
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const CHAIN = "ethereum";
 
-// Provider with reconnection logic
-let provider;
-let reconnectAttempts = 0;
-const MAX_RECONNECT = 10;
-const contracts = new Map(); // Store contract instances
+const POLL_MS = Number(process.env.POLL_MS || 15000);          // 15s
+const CONFIRMATIONS = Number(process.env.CONFIRMATIONS || 2);  // reorg safety
+const MAX_BLOCK_RANGE = Number(process.env.MAX_BLOCK_RANGE || 5); // <= 10 for Alchemy free constraints
 
-// Event queue with deduplication
-const eventQueue = [];
-const processedEvents = new Set();
-let isProcessing = false;
+// =========================
+// Provider (polling-first)
+// =========================
 
-// Track last processed block for each collection to avoid reprocessing
-const lastProcessedBlock = new Map();
+const provider = new ethers.JsonRpcProvider(process.env.RPC_HTTP_URL);
 
-// Polling backup - checks for missed mints every 2 minutes
-async function startPollingBackup() {
-  setInterval(async () => {
-    try {
-      console.log('🔍 Running polling backup check...');
-      
-      for (const col of config.collections) {
-        if (!col.contractAddress || !col.standard) continue;
-        
-        const contract = contracts.get(col.contractAddress);
-        if (!contract) continue;
-        
-        const currentBlock = await provider.getBlockNumber();
-        const lastBlock = lastProcessedBlock.get(col.contractAddress) || currentBlock - 100;
-        
-        // Only check last 100 blocks max to avoid too many RPC calls
-        const fromBlock = Math.max(lastBlock + 1, currentBlock - 100);
-        
-        if (fromBlock > currentBlock) continue;
-        
-        try {
-          if (col.standard.toLowerCase() === 'erc1155') {
-            // Check for TransferSingle events
-            const singleEvents = await contract.queryFilter(
-              contract.filters.TransferSingle(null, '0x0000000000000000000000000000000000000000'),
-              fromBlock,
-              currentBlock
-            );
-            
-            // Check for TransferBatch events
-            const batchEvents = await contract.queryFilter(
-              contract.filters.TransferBatch(null, '0x0000000000000000000000000000000000000000'),
-              fromBlock,
-              currentBlock
-            );
-            
-            if (singleEvents.length > 0 || batchEvents.length > 0) {
-              console.log(`📦 Polling found ${singleEvents.length + batchEvents.length} ERC1155 events for ${col.name}`);
-            }
-            
-            for (const event of singleEvents) {
-              const eventId = `${event.transactionHash}-${event.logIndex}-single`;
-              if (!processedEvents.has(eventId)) {
-                console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${event.args.id}`);
-                processedEvents.add(eventId); // Mark immediately to prevent double-queueing
-                eventQueue.push({
-                  eventId,
-                  handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
-                });
-              }
-            }
-            
-            for (const event of batchEvents) {
-              const ids = event.args.ids;
-              const values = event.args.values;
-              for (let i = 0; i < ids.length; i++) {
-                const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
-                if (!processedEvents.has(eventId)) {
-                  console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${ids[i]}`);
-                  processedEvents.add(eventId); // Mark immediately
-                  eventQueue.push({
-                    eventId,
-                    handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
-                  });
-                }
-              }
-            }
-          } else if (col.standard.toLowerCase() === 'erc721') {
-            if (["Issues", "Metamorphosis"].includes(col.name)) {
-              await enqueueMissedAuctionEvents(col, contract, fromBlock, currentBlock);
-              continue;
-            }
-            
-            const events = await contract.queryFilter(
-              contract.filters.Transfer('0x0000000000000000000000000000000000000000'),
-              fromBlock,
-              currentBlock
-            );
-            
-            if (events.length > 0) {
-              console.log(`📦 Polling found ${events.length} ERC721 events for ${col.name}`);
-            }
-            
-            for (const event of events) {
-              const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
-              if (!processedEvents.has(eventId)) {
-                console.log(`⚠️  Missed mint detected! Processing ${col.name} token ${event.args.tokenId}`);
-                processedEvents.add(eventId); // Mark immediately
-                eventQueue.push({
-                  eventId,
-                  handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
-                });
-              }
-            }
-          }
-        } catch (error) {
-          console.error(`Error polling ${col.name}:`, error.message);
-        }
-        
-        lastProcessedBlock.set(col.contractAddress, currentBlock);
-      }
-    } catch (error) {
-      console.error('❌ Error in polling backup:', error);
-    }
-  }, 120000); // Every 2 minutes
+// =========================
+// State persistence (disk)
+// =========================
+
+const STATE_DIR = path.join(__dirname, "state");
+if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR);
+
+function stateFileFor(address) {
+  return path.join(STATE_DIR, `${address.toLowerCase()}.json`);
 }
 
-// Scan recent blocks on startup to catch mints during downtime
-async function scanRecentBlocks() {
+function loadState(address) {
+  const p = stateFileFor(address);
+  if (!fs.existsSync(p)) {
+    return { lastProcessedBlock: 0, processed: {} };
+  }
   try {
-    console.log('🔎 Scanning last 10 blocks for missed events during downtime...');
-    const currentBlock = await provider.getBlockNumber();
-    const fromBlock = currentBlock - 10; // Reduced to 10 blocks to avoid Alchemy rate limits
-    
-    for (const col of config.collections) {
-      if (!col.contractAddress || !col.standard) continue;
-      
-      const contract = contracts.get(col.contractAddress);
-      if (!contract) continue;
-      
-      try {
-        if (col.standard.toLowerCase() === 'erc1155') {
-          const singleEvents = await contract.queryFilter(
-            contract.filters.TransferSingle(null, '0x0000000000000000000000000000000000000000'),
-            fromBlock,
-            currentBlock
-          );
-          
-          const batchEvents = await contract.queryFilter(
-            contract.filters.TransferBatch(null, '0x0000000000000000000000000000000000000000'),
-            fromBlock,
-            currentBlock
-          );
-          
-          if (singleEvents.length > 0 || batchEvents.length > 0) {
-            console.log(`📦 Found ${singleEvents.length + batchEvents.length} recent ${col.name} events`);
-          }
-          
-          for (const event of singleEvents) {
-            const eventId = `${event.transactionHash}-${event.logIndex}-single`;
-            if (!processedEvents.has(eventId)) {
-              processedEvents.add(eventId);
-              eventQueue.push({
-                eventId,
-                handler: () => handleMint(col, 'erc1155', contract, event.args.id, event, event.args.to, event.args.value)
-              });
-            }
-          }
-          
-          for (const event of batchEvents) {
-            const ids = event.args.ids;
-            const values = event.args.values;
-            for (let i = 0; i < ids.length; i++) {
-              const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
-              if (!processedEvents.has(eventId)) {
-                processedEvents.add(eventId);
-                eventQueue.push({
-                  eventId,
-                  handler: () => handleMint(col, 'erc1155', contract, ids[i], event, event.args.to, values[i])
-                });
-              }
-            }
-          }
-        } else if (col.standard.toLowerCase() === 'erc721') {
-          if (["Issues", "Metamorphosis"].includes(col.name)) continue;
-          
-          const events = await contract.queryFilter(
-            contract.filters.Transfer('0x0000000000000000000000000000000000000000'),
-            fromBlock,
-            currentBlock
-          );
-          
-          if (events.length > 0) {
-            console.log(`📦 Found ${events.length} recent ${col.name} events`);
-          }
-          
-          for (const event of events) {
-            const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
-            if (!processedEvents.has(eventId)) {
-              processedEvents.add(eventId);
-              eventQueue.push({
-                eventId,
-                handler: () => handleMint(col, 'erc721', contract, event.args.tokenId, event, event.args.to, 1)
-              });
-            }
-          }
-        }
-      } catch (error) {
-        console.log(`⚠️  Could not scan ${col.name} - skipping (will be caught by polling backup)`);
-      }
-      
-      lastProcessedBlock.set(col.contractAddress, currentBlock);
-    }
-    
-    console.log('✅ Startup scan complete');
-  } catch (error) {
-    console.error('❌ Error scanning recent blocks:', error.message);
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    // If state is corrupted, fail safe by starting at 0 (we’ll set it on boot)
+    return { lastProcessedBlock: 0, processed: {} };
   }
 }
 
-// Enqueue auction events that may have been missed during downtime or websocket hiccups
-async function enqueueMissedAuctionEvents(collection, contract, fromBlock, toBlock) {
-  const MAX_RANGE = 10; // RPC free tier limit
-  const startBlock = Number(fromBlock);
-  const endBlock = Number(toBlock);
-
-  if (!Number.isFinite(startBlock) || !Number.isFinite(endBlock) || startBlock > endBlock) {
-    console.error(`Invalid block numbers when enqueueing auction events for ${collection.name}`);
-    return;
+function saveState(address, state) {
+  // prune processed map to avoid disk growth
+  const keys = Object.keys(state.processed || {});
+  if (keys.length > 6000) {
+    // keep last ~3000 by insertion order approximation
+    const keep = keys.slice(-3000);
+    const next = {};
+    for (const k of keep) next[k] = true;
+    state.processed = next;
   }
-
-  const chunkedRanges = [];
-  let cursor = startBlock;
-  while (cursor <= endBlock) {
-    const upper = Math.min(cursor + MAX_RANGE - 1, endBlock);
-    chunkedRanges.push([cursor, upper]);
-    cursor = upper + 1;
-  }
-
-  for (const [chunkStart, chunkEnd] of chunkedRanges) {
-    const revealedEvents = await contract.queryFilter(
-      contract.filters.PieceRevealed(),
-      chunkStart,
-      chunkEnd
-    );
-
-    for (const event of revealedEvents) {
-      const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
-      if (processedEvents.has(eventId)) continue;
-      processedEvents.add(eventId);
-      eventQueue.push({
-        eventId,
-        handler: () => handlePieceRevealed(collection, contract, event)
-      });
-    }
-  }
-
-  for (const [chunkStart, chunkEnd] of chunkedRanges) {
-    const bidEvents = await contract.queryFilter(
-      contract.filters.NewBidPlaced(),
-      chunkStart,
-      chunkEnd
-    );
-
-    for (const event of bidEvents) {
-      const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
-      if (processedEvents.has(eventId)) continue;
-      processedEvents.add(eventId);
-      const bidStruct = event.args?.bid || event.args?.[0];
-      const bidder = bidStruct?.bidder || bidStruct?.[0];
-      const amount = bidStruct?.amount || bidStruct?.[1];
-      eventQueue.push({
-        eventId,
-        handler: () => handleNewBid(collection, contract, bidder, amount, event)
-      });
-    }
-  }
+  fs.writeFileSync(stateFileFor(address), JSON.stringify(state, null, 2));
 }
 
+function seenKey(log) {
+  return `${log.transactionHash}-${log.index}`;
+}
+
+// =========================
+// Discord client + rate limit
+// =========================
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+const rateLimiter = {
+  lastSent: 0,
+  async send(channel, payload) {
+    const now = Date.now();
+    const dt = now - this.lastSent;
+    if (dt < 1200) await new Promise((r) => setTimeout(r, 1200 - dt));
+    await channel.send(payload);
+    this.lastSent = Date.now();
+  },
+};
+
+// =========================
 // ABIs
-const AUCTION_ERC721_ABI = [
+// =========================
+
+// ERC721 mint
+const ERC721_ABI = [
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
-  "event PieceRevealed()",
-  "event NewBidPlaced((address payable bidder, uint256 amount) bid)",
-  "function currentTokenId() view returns (uint256)",
   "function tokenURI(uint256 tokenId) view returns (string)",
-  "function auctionEnded() view returns (bool)"
 ];
 
+// ERC1155 mint
 const ERC1155_ABI = [
   "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
   "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)",
-  "function uri(uint256 id) view returns (string)"
+  "function uri(uint256 id) view returns (string)",
 ];
 
-// Discord client
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
+// Auction-specific (Issues + Metamorphosis)
+const AUCTION_ABI = [
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+  "event PieceRevealed()",
+  "event NewBidPlaced((address payable bidder, uint256 amount) bid)",
+  "function totalSupply() view returns (uint256)",
+];
 
-// Discord rate limiter
-const rateLimiter = {
-  lastSent: 0,
-  
-  async send(channel, message) {
-    const now = Date.now();
-    const timeSinceLastSent = now - this.lastSent;
-    
-    // Discord allows 5 messages per 5 seconds, so wait 1.2s between messages to be safe
-    if (timeSinceLastSent < 1200) {
-      await new Promise(r => setTimeout(r, 1200 - timeSinceLastSent));
-    }
-    
-    await channel.send(message);
-    this.lastSent = Date.now();
-  }
-};
+// =========================
+// Helpers (metadata, ENS, price)
+// =========================
 
-// ETH price cache (60 second cache)
-let cachedEthPrice = null;
-let cacheTime = 0;
-
-async function getEthPrice() {
-  if (Date.now() - cacheTime < 60000 && cachedEthPrice) {
-    return cachedEthPrice;
-  }
-  
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-    
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd", {
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    
-    const data = await res.json();
-    cachedEthPrice = data.ethereum.usd;
-    cacheTime = Date.now();
-    return cachedEthPrice;
-  } catch (e) {
-    console.log("⚠️  CoinGecko API failed, using cached/no USD price");
-    return cachedEthPrice;
-  }
-}
-
-// Retry wrapper for async functions
 async function retryAsync(fn, retries = 3, delay = 1000) {
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
     } catch (e) {
-      console.log(`Retry ${i + 1}/${retries} failed:`, e.message);
       if (i === retries - 1) throw e;
-      await new Promise(r => setTimeout(r, delay * (i + 1)));
+      await new Promise((r) => setTimeout(r, delay * (i + 1)));
     }
   }
 }
 
-// Event queue processor with deduplication
-const processQueue = async () => {
-  if (isProcessing || eventQueue.length === 0) return;
-  isProcessing = true;
-  
-  while (eventQueue.length > 0) {
-    const { handler, eventId } = eventQueue.shift();
-    
-    // Mark as processed BEFORE handling to prevent race conditions
-    if (processedEvents.has(eventId)) {
-      console.log(`⏭️  Skipping duplicate event: ${eventId.slice(0, 20)}...`);
-      continue;
-    }
-    processedEvents.add(eventId); // Add BEFORE processing
-    
-    // Prevent memory leak - keep only last 5000 events
-    if (processedEvents.size > 10000) {
-      const arr = Array.from(processedEvents);
-      processedEvents.clear();
-      arr.slice(-5000).forEach(id => processedEvents.add(id));
-      console.log("🧹 Cleaned up processed events cache");
-    }
-    
-    try { 
-      await handler(); 
-    } catch (e) { 
-      console.error("❌ Queue processing error:", e);
-    }
-  }
-  
-  isProcessing = false;
-};
-
-// Process queue more frequently
-setInterval(processQueue, 100);
-
-// Create provider with reconnection logic
-async function createProvider() {
-  try {
-    if (provider) {
-      try {
-        await provider.destroy();
-      } catch (e) {
-        console.log("Error destroying old provider:", e.message);
-      }
-    }
-
-    console.log("🔌 Connecting to WebSocket...");
-    provider = new WebSocketProvider(process.env.RPC_WEBSOCKET_URL);
-    
-    // Wait for connection to be ready first
-    await provider.getNetwork();
-    console.log("✅ WebSocket connected");
-    reconnectAttempts = 0;
-    
-    // Now attach WebSocket event handlers (after connection is established)
-    if (provider._websocket) {
-      provider._websocket.on('close', (code, reason) => {
-        console.error(`❌ WebSocket closed (code: ${code}, reason: ${reason})`);
-        handleReconnect();
-      });
-      
-      provider._websocket.on('error', (err) => {
-        console.error('❌ WebSocket error:', err.message);
-      });
-    }
-    
-    // Reattach listeners after reconnect
-    await startWatchers();
-    
-    // Scan for missed events on first connection
-    if (reconnectAttempts === 0) {
-      await scanRecentBlocks();
-      startPollingBackup();
-    }
-    
-    console.log("✅ Provider ready and watchers started");
-  } catch (error) {
-    console.error("❌ Failed to create provider:", error.message);
-    console.error("Full error:", error);
-    handleReconnect();
-  }
+function fix1155Uri(uri, tokenId) {
+  const hexId = tokenId.toString(16).padStart(64, "0");
+  return uri.replace("{id}", hexId).replace("{ID}", hexId);
 }
 
-function handleReconnect() {
-  if (reconnectAttempts >= MAX_RECONNECT) {
-    console.error(`❌ Max reconnection attempts (${MAX_RECONNECT}) reached. Exiting.`);
-    process.exit(1);
+function normalizeUri(uri) {
+  if (!uri) return uri;
+
+  if (uri.startsWith("ipfs://")) {
+    return `https://ipfs.io/ipfs/${uri.slice(7)}`;
   }
-  
-  reconnectAttempts++;
-  const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
-  console.log(`🔄 Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT})...`);
-  
-  setTimeout(() => {
-    createProvider().catch(err => {
-      console.error("❌ Reconnection failed:", err.message);
-    });
-  }, delay);
-}
 
-client.once("clientReady", () => {
-  console.log(`✅ Discord bot logged in as ${client.user.tag}`);
-  createProvider().catch(err => {
-    console.error("❌ Error during initial connection:", err);
-    process.exit(1);
-  });
-});
-
-// Start watchers for each collection
-async function startWatchers() {
-  // Clear old contracts
-  for (const [addr, contract] of contracts.entries()) {
-    try {
-      contract.removeAllListeners();
-    } catch (e) {
-      console.log("Error removing listeners:", e.message);
-    }
+  if (uri.startsWith("data:application/json;base64,")) {
+    const base64 = uri.slice("data:application/json;base64,".length);
+    const json = Buffer.from(base64, "base64").toString("utf-8");
+    const data = JSON.parse(json);
+    if (data.image) return normalizeUri(data.image);
+    return null;
   }
-  contracts.clear();
 
-  for (const col of config.collections) {
-    if (!col.contractAddress || !col.standard) continue;
-
-    if (col.standard.toLowerCase() === "erc721") {
-      const contract = new Contract(col.contractAddress, AUCTION_ERC721_ABI, provider);
-      contracts.set(col.contractAddress, contract);
-      console.log(`👀 Watching ERC721: ${col.name}`);
-
-      contract.on("Transfer", async (from, to, tokenId, event) => {
-        if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        
-        // Skip mint posts for Issues/Metamorphosis - they're handled by auction events
-        if (["Issues", "Metamorphosis"].includes(col.name)) return;
-        
-        const eventId = `${event.transactionHash}-${event.logIndex}-transfer`;
-        eventQueue.push({ 
-          eventId,
-          handler: () => handleMint(col, "erc721", contract, tokenId, event, to, 1) 
-        });
-      });
-
-      // Auction watchers only for Issues and Metamorphosis
-      if (["Issues", "Metamorphosis"].includes(col.name)) {
-        console.log(`🎯 Watching Auctions for: ${col.name}`);
-
-        contract.on("PieceRevealed", async (event) => {
-          const eventId = `${event.transactionHash}-${event.logIndex}-revealed`;
-          eventQueue.push({ 
-            eventId,
-            handler: async () => {
-              // PieceRevealed means: previous auction ended (if there was one) and next piece is revealed
-              await handlePieceRevealed(col, contract, event);
-            }
-          });
-        });
-
-        contract.on("NewBidPlaced", async (bidStruct, event) => {
-          const { bidder, amount } = bidStruct;
-          const eventId = `${event.transactionHash}-${event.logIndex}-bid`;
-          eventQueue.push({ 
-            eventId,
-            handler: () => handleNewBid(col, contract, bidder, amount, event) 
-          });
-        });
-      }
-
-    } else if (col.standard.toLowerCase() === "erc1155") {
-      const contract = new Contract(col.contractAddress, ERC1155_ABI, provider);
-      contracts.set(col.contractAddress, contract);
-      console.log(`👀 Watching ERC1155: ${col.name}`);
-
-      contract.on("TransferSingle", async (op, from, to, id, value, event) => {
-        if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        const eventId = `${event.transactionHash}-${event.logIndex}-single`;
-        eventQueue.push({ 
-          eventId,
-          handler: () => handleMint(col, "erc1155", contract, id, event, to, value) 
-        });
-      });
-
-      contract.on("TransferBatch", async (op, from, to, ids, values, event) => {
-        if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) return;
-        for (let i = 0; i < ids.length; i++) {
-          const eventId = `${event.transactionHash}-${event.logIndex}-batch-${i}`;
-          eventQueue.push({ 
-            eventId,
-            handler: () => handleMint(col, "erc1155", contract, ids[i], event, to, values[i]) 
-          });
-        }
-      });
-    }
-  }
-}
-
-// Main mint handler
-async function handleMint(collection, standard, contract, tokenId, event, to, quantity) {
-  try {
-    const tokenIdStr = tokenId.toString();
-    console.log(`🎨 Processing mint: ${collection.name} #${tokenIdStr}`);
-    
-    // For Issues and Metamorphosis, use 8NAP's S3 bucket directly (contract metadata is stale)
-    let imageUrl = null;
-    let title = `${collection.name} #${tokenIdStr}`;
-    
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
-    } else {
-      // For other collections, load metadata normally
-      const metadata = await retryAsync(() => loadMetadata(standard, contract, tokenId));
-      title = metadata?.name || title;
-      if (metadata && metadata.image) {
-        imageUrl = normalizeUri(metadata.image);
-      }
-    }
-
-    const artist = collection.artist || "Unknown";
-
-    let minter = to;
-    try {
-      const ens = await provider.lookupAddress(getAddress(to));
-      if (ens) minter = ens;
-      else minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
-    } catch {
-      minter = `${to.slice(0, 6)}...${to.slice(-4)}`;
-    }
-
-    const tx = await event.getTransaction();
-    const priceEth = formatEther(tx.value);
-    let priceLine = `Price: **${priceEth} ETH**`;
-    
-    const ethPriceUsd = await getEthPrice();
-    if (ethPriceUsd) {
-      const priceUsd = (parseFloat(priceEth) * ethPriceUsd).toFixed(2);
-      priceLine = `Price: **${priceEth} ETH** ($${priceUsd})`;
-    }
-
-    const block = await event.getBlock();
-    const timestamp = block.timestamp;
-
-    const openseaUrl = `https://opensea.io/assets/${CHAIN}/${collection.contractAddress}/${tokenIdStr}`;
-
-    const channel = await client.channels.fetch(config.discordChannelId);
-
-    const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription([
-        `Collection: **${collection.name}**`,
-        `Artist: **${artist}**`,
-        `Minting Wallet: **${minter}**`,
-        priceLine,
-        ...(standard === "erc1155" ? [`Quantity: **${quantity}**`] : []),
-        ``,
-        `[View on OpenSea](${openseaUrl})`
-      ].join("\n"))
-      .setTimestamp(new Date(timestamp * 1000))
-      .setFooter({ text: collection.name });
-
-    if (imageUrl) embed.setImage(imageUrl);
-
-    await rateLimiter.send(channel, { embeds: [embed] });
-    console.log(`✅ Mint sent: ${title} — ${priceEth} ETH`);
-  } catch (error) {
-    console.error(`❌ Error handling mint for ${collection.name}:`, error);
-  }
-}
-
-// New Auction Started
-async function handleNewAuctionStarted(collection, contract, event) {
-  try {
-    console.log(`🎯 New auction started: ${collection.name}`);
-    
-    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
-
-    let revealerDisplay = "unknown";
-    try {
-      const tx = await event.getTransactionReceipt();
-      const revealer = tx.from;
-      if (revealer) revealerDisplay = await formatDisplayAddress(revealer);
-    } catch (error) {
-      console.log(`⚠️  Could not enrich revealer for ${collection.name} auction start:`, error.message);
-    }
-
-    const openingBid = collection.name === "Issues" ? "0.100" : "0.079";
-    const viewLink = getAuctionViewLink(collection);
-
-    const channel = await client.channels.fetch(config.auctionChannelId);
-
-    const embed = new EmbedBuilder()
-      .setTitle(`New ${collection.name} Auction Started!`)
-      .setDescription([
-        `Artist: **${collection.artist}**`,
-        `Current Piece: #${tokenIdStr}`,
-        `Opening Bid: **${openingBid} ETH**`,
-        `Bidder: **${revealerDisplay}**`,
-        ``,
-        `[View on 8NAP](${viewLink})`
-      ].join("\n"))
-      .setColor(0x00ff00)
-      .setTimestamp()
-      .setFooter({ text: collection.name });
-
-    if (imageUrl) embed.setImage(imageUrl);
-
-    await rateLimiter.send(channel, { embeds: [embed] });
-    console.log(`✅ New auction started: ${collection.name} #${tokenIdStr}`);
-  } catch (error) {
-    console.error(`❌ Error handling auction start for ${collection.name}:`, error);
-  }
-}
-
-// New Bid Placed
-async function handleNewBid(collection, contract, bidder, amount, event) {
-  try {
-    console.log(`💰 New bid: ${collection.name}`);
-    
-    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
-
-    const bidderDisplay = await formatDisplayAddress(bidder);
-
-    const viewLink = getAuctionViewLink(collection);
-
-    const channel = await client.channels.fetch(config.auctionChannelId);
-
-    const embed = new EmbedBuilder()
-      .setTitle(`New Bid Placed`)
-      .setDescription([
-        `Collection: **${collection.name}**`,
-        `Piece: #${tokenIdStr}`,
-        `Bidder: **${bidderDisplay}**`,
-        `Amount: **${formatEther(amount)} ETH**`,
-        ``,
-        `[View on 8NAP](${viewLink})`
-      ].join("\n"))
-      .setColor(0xff0000)
-      .setTimestamp()
-      .setFooter({ text: collection.name });
-
-    if (imageUrl) embed.setImage(imageUrl);
-
-    await rateLimiter.send(channel, { embeds: [embed] });
-    console.log(`✅ Auction bid sent: ${collection.name} - ${formatEther(amount)} ETH`);
-  } catch (error) {
-    console.error(`❌ Error handling bid for ${collection.name}:`, error);
-  }
-}
-
-// Piece revealed event - decides whether this signals a new auction or a post-auction reveal
-async function handlePieceRevealed(collection, contract, event) {
-  try {
-    let ended = false;
-    try {
-      ended = await contract.auctionEnded();
-    } catch (error) {
-      console.log(`⚠️  Could not verify auctionEnded for ${collection.name}:`, error.message);
-    }
-    if (ended) {
-      await handlePieceRevealedAfterEnd(collection, contract, event);
-    } else {
-      await handleNewAuctionStarted(collection, contract, event);
-    }
-  } catch (error) {
-    console.error(`❌ Error handling PieceRevealed for ${collection.name}:`, error);
-  }
-}
-
-// Piece Revealed After Auction Ended
-async function handlePieceRevealedAfterEnd(collection, contract, event) {
-  try {
-    console.log(`🎨 Piece revealed after auction: ${collection.name}`);
-    
-    const { tokenIdStr, imageUrl } = await getAuctionTokenDetails(collection, () => contract.currentTokenId());
-
-    let revealerDisplay = "unknown";
-    try {
-      const tx = await event.getTransactionReceipt();
-      const revealer = tx.from;
-      if (revealer) revealerDisplay = await formatDisplayAddress(revealer);
-    } catch (error) {
-      console.log(`⚠️  Could not enrich revealer for ${collection.name} post-auction reveal:`, error.message);
-    }
-
-    const viewLink = getAuctionViewLink(collection);
-
-    const channel = await client.channels.fetch(config.auctionChannelId);
-
-    const embed = new EmbedBuilder()
-      .setTitle(`Piece Revealed After Auction Ended`)
-      .setDescription([
-        `Collection: **${collection.name}**`,
-        `Artist: **${collection.artist}**`,
-        `Revealed by: **${revealerDisplay}**`,
-        `Piece #${tokenIdStr} is now revealed and ready for the next auction!`,
-        ``,
-        `[View on 8NAP](${viewLink})`
-      ].join("\n"))
-      .setColor(0x9d00ff)
-      .setTimestamp()
-      .setFooter({ text: collection.name });
-
-    if (imageUrl) embed.setImage(imageUrl);
-
-    await rateLimiter.send(channel, { embeds: [embed] });
-    console.log(`✅ Post-auction reveal sent: ${collection.name} #${tokenIdStr}`);
-  } catch (error) {
-    console.error(`❌ Error handling post-auction reveal for ${collection.name}:`, error);
-  }
+  return uri;
 }
 
 async function loadMetadata(standard, contract, tokenId) {
@@ -791,105 +166,469 @@ async function loadMetadata(standard, contract, tokenId) {
       uri = await contract.uri(tokenId);
       uri = fix1155Uri(uri, tokenId);
     }
-
     const url = normalizeUri(uri);
-    
+    if (!url) return null;
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
-    
+
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeoutId);
-    
     if (!res.ok) return null;
+
     return await res.json();
-  } catch (e) {
-    console.log("⚠️  Failed to load metadata:", e.message);
+  } catch {
     return null;
   }
-}
-
-function fix1155Uri(uri, tokenId) {
-  const hexId = tokenId.toString(16).padStart(64, "0");
-  return uri.replace("{id}", hexId).replace("{ID}", hexId);
-}
-
-function normalizeUri(uri) {
-  if (uri.startsWith("ipfs://")) {
-    return `https://ipfs.io/ipfs/${uri.slice(7)}`;
-  }
-  if (uri.startsWith("data:application/json;base64,")) {
-    const base64 = uri.slice(29);
-    const json = Buffer.from(base64, "base64").toString("utf-8");
-    const data = JSON.parse(json);
-    if (data.image && data.image.startsWith("data:image")) {
-      return data.image;
-    }
-    return normalizeUri(data.image);
-  }
-  return uri;
 }
 
 async function formatDisplayAddress(address) {
   if (!address) return "unknown";
   let display = `${address.slice(0, 6)}...${address.slice(-4)}`;
   try {
-    const ens = await provider.lookupAddress(getAddress(address));
+    const ens = await provider.lookupAddress(ethers.getAddress(address));
     if (ens) display = ens;
-  } catch (error) {
-    // ENS lookup failures are non-blocking
-  }
+  } catch {}
   return display;
 }
 
-async function getAuctionTokenDetails(collection, tokenIdFetcher) {
-  let tokenIdStr = "unknown";
+// ETH price cache (optional)
+let cachedEthPrice = null;
+let cacheTime = 0;
+
+async function getEthPriceUsd() {
+  if (Date.now() - cacheTime < 60000 && cachedEthPrice) return cachedEthPrice;
   try {
-    const tokenId = await tokenIdFetcher();
-    if (tokenId !== undefined && tokenId !== null) {
-      tokenIdStr = tokenId.toString();
-    }
-  } catch (error) {
-    console.log(`⚠️  Could not fetch tokenId for ${collection.name}:`, error.message);
-  }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
 
-  let imageUrl = null;
-  if (tokenIdStr !== "unknown") {
-    if (collection.name === "Issues") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
-    } else if (collection.name === "Metamorphosis") {
-      imageUrl = `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
-    }
-  }
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
+      { signal: controller.signal }
+    );
 
-  return { tokenIdStr, imageUrl };
+    clearTimeout(timeoutId);
+    const data = await res.json();
+    cachedEthPrice = data?.ethereum?.usd ?? null;
+    cacheTime = Date.now();
+    return cachedEthPrice;
+  } catch {
+    return cachedEthPrice;
+  }
 }
 
-function getAuctionViewLink(collection) {
-  return collection.name === "Issues"
+// =========================
+// Embed builders
+// =========================
+
+function openseaUrl(contractAddress, tokenId) {
+  return `https://opensea.io/assets/${CHAIN}/${contractAddress}/${tokenId}`;
+}
+
+function auctionViewLink(collectionName) {
+  return collectionName === "Issues"
     ? "https://8nap.art/collection/issues"
     : "https://8nap.art/collection/metamorphosis";
 }
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('🛑 Shutting down gracefully...');
-  await processQueue(); // Finish processing queue
-  if (provider) await provider.destroy();
-  process.exit(0);
-});
+function s3Preview(collectionName, tokenIdStr) {
+  if (collectionName === "Issues") {
+    return `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
+  }
+  if (collectionName === "Metamorphosis") {
+    return `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
+  }
+  return null;
+}
 
-process.on('SIGINT', async () => {
-  console.log('🛑 Shutting down gracefully...');
-  await processQueue();
-  if (provider) await provider.destroy();
-  process.exit(0);
-});
+// =========================
+// Event processing (mints + auctions)
+// =========================
 
-// Heartbeat monitoring (every 5 minutes)
-setInterval(() => {
-  const queueSize = eventQueue.length;
-  const cacheSize = processedEvents.size;
-  console.log(`💓 Heartbeat: Queue=${queueSize}, Cache=${cacheSize}, Reconnects=${reconnectAttempts}`);
+async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, quantity) {
+  const tokenIdStr = tokenId.toString();
+
+  // Image + title
+  let imageUrl = null;
+  let title = `${collection.name} #${tokenIdStr}`;
+
+  if (collection.name === "Issues" || collection.name === "Metamorphosis") {
+    imageUrl = s3Preview(collection.name, tokenIdStr);
+  } else {
+    const metadata = await retryAsync(() => loadMetadata(standard, contract, tokenId));
+    title = metadata?.name || title;
+    if (metadata?.image) imageUrl = normalizeUri(metadata.image);
+  }
+
+  // tx value
+  let priceEth = "0";
+  try {
+    const tx = await provider.getTransaction(txHash);
+    if (tx?.value != null) priceEth = ethers.formatEther(tx.value);
+  } catch {}
+
+  let priceLine = `Price: **${priceEth} ETH**`;
+  const ethUsd = await getEthPriceUsd();
+  if (ethUsd) {
+    const usd = (parseFloat(priceEth) * ethUsd).toFixed(2);
+    priceLine = `Price: **${priceEth} ETH** ($${usd})`;
+  }
+
+  // minter display
+  const minterDisplay = await formatDisplayAddress(to);
+
+  // timestamp
+  let timestampMs = Date.now();
+  try {
+    const block = await provider.getBlock(blockNumber);
+    if (block?.timestamp) timestampMs = block.timestamp * 1000;
+  } catch {}
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(
+      [
+        `Collection: **${collection.name}**`,
+        `Artist: **${collection.artist || "Unknown"}**`,
+        `Minting Wallet: **${minterDisplay}**`,
+        priceLine,
+        ...(standard === "erc1155" ? [`Quantity: **${quantity}**`] : []),
+        ``,
+        `[View on OpenSea](${openseaUrl(collection.contractAddress, tokenIdStr)})`,
+      ].join("\n")
+    )
+    .setTimestamp(new Date(timestampMs))
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  const channel = await client.channels.fetch(config.discordChannelId);
+  await rateLimiter.send(channel, { embeds: [embed] });
+}
+
+async function postPieceRevealed(collection, contract, txHash, blockNumber) {
+  // Correct token id source: totalSupply after reveal
+  let tokenId = null;
+  try {
+    tokenId = await contract.totalSupply();
+  } catch {
+    tokenId = null;
+  }
+
+  const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
+  const imageUrl = tokenId != null ? s3Preview(collection.name, tokenIdStr) : null;
+
+  let timestampMs = Date.now();
+  try {
+    const block = await provider.getBlock(blockNumber);
+    if (block?.timestamp) timestampMs = block.timestamp * 1000;
+  } catch {}
+
+  const embed = new EmbedBuilder()
+    .setTitle(`New Piece Revealed`)
+    .setDescription(
+      [
+        `Collection: **${collection.name}**`,
+        `Artist: **${collection.artist || "Unknown"}**`,
+        `Piece: **#${tokenIdStr}**`,
+        ``,
+        `Auction is now live.`,
+        ``,
+        `[View on 8NAP](${auctionViewLink(collection.name)})`,
+        `Tx: https://etherscan.io/tx/${txHash}`,
+      ].join("\n")
+    )
+    .setTimestamp(new Date(timestampMs))
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  const channel = await client.channels.fetch(config.auctionChannelId);
+  await rateLimiter.send(channel, { embeds: [embed] });
+}
+
+async function postBid(collection, contract, bidder, amountWei, isFirstBid, txHash, blockNumber) {
+  let tokenId = null;
+  try {
+    tokenId = await contract.totalSupply();
+  } catch {
+    tokenId = null;
+  }
+
+  const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
+  const imageUrl = tokenId != null ? s3Preview(collection.name, tokenIdStr) : null;
+
+  const bidderDisplay = await formatDisplayAddress(bidder);
+  const amountEth = ethers.formatEther(amountWei);
+
+  let timestampMs = Date.now();
+  try {
+    const block = await provider.getBlock(blockNumber);
+    if (block?.timestamp) timestampMs = block.timestamp * 1000;
+  } catch {}
+
+  const title = isFirstBid ? `Auction Started (First Bid)` : `New Bid Placed`;
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(
+      [
+        `Collection: **${collection.name}**`,
+        `Piece: **#${tokenIdStr}**`,
+        `Bidder: **${bidderDisplay}**`,
+        `Amount: **${amountEth} ETH**`,
+        ``,
+        `[View on 8NAP](${auctionViewLink(collection.name)})`,
+        `Tx: https://etherscan.io/tx/${txHash}`,
+      ].join("\n")
+    )
+    .setTimestamp(new Date(timestampMs))
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  const channel = await client.channels.fetch(config.auctionChannelId);
+  await rateLimiter.send(channel, { embeds: [embed] });
+}
+
+// =========================
+// Polling engine
+// =========================
+
+// Track first bid per tokenId per collection (in-memory is fine; correctness comes from logs + dedupe)
+const firstBidSeen = new Map(); // key: `${collectionAddress}-${tokenIdStr}` -> true
+
+function markFirstBid(collectionAddress, tokenIdStr) {
+  firstBidSeen.set(`${collectionAddress.toLowerCase()}-${tokenIdStr}`, true);
+}
+function hasFirstBid(collectionAddress, tokenIdStr) {
+  return firstBidSeen.has(`${collectionAddress.toLowerCase()}-${tokenIdStr}`);
+}
+
+async function initializeStateToHeadIfEmpty(collection) {
+  const st = loadState(collection.contractAddress);
+  if (!st.lastProcessedBlock || st.lastProcessedBlock === 0) {
+    const head = await provider.getBlockNumber();
+    st.lastProcessedBlock = head - CONFIRMATIONS;
+    if (st.lastProcessedBlock < 0) st.lastProcessedBlock = 0;
+    saveState(collection.contractAddress, st);
+  }
+}
+
+async function pollOnce() {
+  const head = await provider.getBlockNumber();
+  const safeHead = head - CONFIRMATIONS;
+  if (safeHead <= 0) return;
+
+  for (const collection of config.collections) {
+    if (!collection.contractAddress || !collection.standard) continue;
+
+    const addr = collection.contractAddress;
+    const standard = collection.standard.toLowerCase();
+
+    const st = loadState(addr);
+    const fromBlock = st.lastProcessedBlock + 1;
+    if (fromBlock > safeHead) continue;
+
+    const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);
+
+    // Build contract + interface + topics based on collection type
+    let contract;
+    let iface;
+    let topics;
+
+    const isAuction = (collection.name === "Issues" || collection.name === "Metamorphosis");
+
+    if (standard === "erc721" && isAuction) {
+      contract = new ethers.Contract(addr, AUCTION_ABI, provider);
+      iface = contract.interface;
+
+      topics = [[
+        iface.getEvent("PieceRevealed").topicHash,
+        iface.getEvent("NewBidPlaced").topicHash,
+        iface.getEvent("Transfer").topicHash,
+      ]];
+    } else if (standard === "erc721") {
+      contract = new ethers.Contract(addr, ERC721_ABI, provider);
+      iface = contract.interface;
+
+      topics = [[ iface.getEvent("Transfer").topicHash ]];
+    } else if (standard === "erc1155") {
+      contract = new ethers.Contract(addr, ERC1155_ABI, provider);
+      iface = contract.interface;
+
+      topics = [[
+        iface.getEvent("TransferSingle").topicHash,
+        iface.getEvent("TransferBatch").topicHash,
+      ]];
+    } else {
+      // unsupported
+      st.lastProcessedBlock = toBlock;
+      saveState(addr, st);
+      continue;
+    }
+
+    let logs = [];
+    try {
+      logs = await provider.getLogs({
+        address: addr,
+        fromBlock,
+        toBlock,
+        topics,
+      });
+    } catch (e) {
+      console.error(`❌ getLogs failed for ${collection.name} ${fromBlock}-${toBlock}:`, e.message);
+      // Do not advance cursor on failure
+      continue;
+    }
+
+    // Process logs in chain order
+    for (const log of logs) {
+      const k = seenKey(log);
+      if (st.processed?.[k]) continue;
+
+      // mark processed BEFORE doing network calls to avoid duplicates on crash loops
+      if (!st.processed) st.processed = {};
+      st.processed[k] = true;
+
+      let parsed;
+      try {
+        parsed = iface.parseLog(log);
+      } catch {
+        continue;
+      }
+
+      try {
+        // ===== Auction (Issues/Metamorphosis) =====
+        if (standard === "erc721" && isAuction) {
+          if (parsed.name === "PieceRevealed") {
+            await postPieceRevealed(collection, contract, log.transactionHash, log.blockNumber);
+          } else if (parsed.name === "NewBidPlaced") {
+            const bidStruct = parsed.args.bid;
+            const bidder = bidStruct.bidder;
+            const amount = bidStruct.amount;
+
+            // determine tokenId via totalSupply (current live piece)
+            let tokenIdNow = null;
+            try {
+              tokenIdNow = await contract.totalSupply();
+            } catch {}
+
+            const tokenIdStr = tokenIdNow != null ? tokenIdNow.toString() : "unknown";
+            const first = tokenIdStr !== "unknown" ? !hasFirstBid(addr, tokenIdStr) : false;
+
+            await postBid(collection, contract, bidder, amount, first, log.transactionHash, log.blockNumber);
+
+            if (tokenIdStr !== "unknown" && first) markFirstBid(addr, tokenIdStr);
+          } else if (parsed.name === "Transfer") {
+            const from = parsed.args.from;
+            const to = parsed.args.to;
+            const tokenId = parsed.args.tokenId;
+
+            // only mint transfers
+            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+
+            // Post mint to mints channel (auction settlement)
+            const mintContract = new ethers.Contract(addr, ERC721_ABI, provider);
+            await postMint(collection, "erc721", mintContract, tokenId, to, log.transactionHash, log.blockNumber, 1);
+          }
+        }
+
+        // ===== ERC721 mint-only =====
+        if (standard === "erc721" && !isAuction) {
+          if (parsed.name !== "Transfer") continue;
+          const from = parsed.args.from;
+          const to = parsed.args.to;
+          const tokenId = parsed.args.tokenId;
+          if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+
+          await postMint(collection, "erc721", contract, tokenId, to, log.transactionHash, log.blockNumber, 1);
+        }
+
+        // ===== ERC1155 mint-only =====
+        if (standard === "erc1155") {
+          if (parsed.name === "TransferSingle") {
+            const from = parsed.args.from;
+            const to = parsed.args.to;
+            const id = parsed.args.id;
+            const value = parsed.args.value;
+            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+
+            await postMint(collection, "erc1155", contract, id, to, log.transactionHash, log.blockNumber, value);
+          } else if (parsed.name === "TransferBatch") {
+            const from = parsed.args.from;
+            const to = parsed.args.to;
+            const ids = parsed.args.ids;
+            const values = parsed.args.values;
+            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+
+            for (let i = 0; i < ids.length; i++) {
+              await postMint(collection, "erc1155", contract, ids[i], to, log.transactionHash, log.blockNumber, values[i]);
+            }
+          }
+        }
+      } catch (e) {
+        // If Discord/HTTP fails mid-event, we still keep processed=true to avoid spam loops.
+        // The cursor ensures we don’t miss later events; this trade-off prevents repeated spam on transient failures.
+        console.error(`❌ Error handling ${collection.name} ${parsed.name}:`, e.message);
+      }
+    }
+
+    // advance cursor only after batch processed
+    st.lastProcessedBlock = toBlock;
+    saveState(addr, st);
+  }
+}
+
+// =========================
+// Startup + loop
+// =========================
+
+let pollTimer = null;
+
+async function startPolling() {
+  // initialize cursors to safe head on first boot, to avoid posting historical spam
+  for (const collection of config.collections) {
+    await initializeStateToHeadIfEmpty(collection);
+  }
+
+  console.log(`✅ Polling started. interval=${POLL_MS}ms confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
+
+  // run immediately, then interval
+  await pollOnce().catch((e) => console.error("pollOnce error:", e.message));
+
+  pollTimer = setInterval(() => {
+    pollOnce().catch((e) => console.error("pollOnce error:", e.message));
+  }, POLL_MS);
+}
+
+// Heartbeat
+setInterval(async () => {
+  try {
+    const head = await provider.getBlockNumber();
+    console.log(`💓 Heartbeat head=${head}`);
+  } catch (e) {
+    console.log(`💓 Heartbeat error: ${e.message}`);
+  }
 }, 300000);
+
+// Graceful shutdown
+async function shutdown(signal) {
+  console.log(`🛑 Shutting down (${signal})...`);
+  if (pollTimer) clearInterval(pollTimer);
+  process.exit(0);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+client.once("clientReady", async () => {
+  console.log(`✅ Discord bot logged in as ${client.user.tag}`);
+  try {
+    await startPolling();
+  } catch (e) {
+    console.error("❌ Failed to start polling:", e.message);
+    process.exit(1);
+  }
+});
 
 client.login(process.env.DISCORD_BOT_TOKEN);
