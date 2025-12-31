@@ -48,10 +48,14 @@ function stateFileFor(address) {
 function loadState(address) {
   const p = stateFileFor(address);
   if (!fs.existsSync(p)) {
-    return { lastProcessedBlock: 0, processed: {} };
+    return { lastProcessedBlock: 0, processed: {}, pendingAuction: null };
+
   }
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+if (!parsed.pendingAuction) parsed.pendingAuction = null;
+return parsed;
+
   } catch {
     // If state is corrupted, fail safe by starting at 0 (we’ll set it on boot)
     return { lastProcessedBlock: 0, processed: {} };
@@ -239,6 +243,47 @@ function s3Preview(collectionName, tokenIdStr) {
     return `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
   }
   return null;
+}
+
+async function postAuctionEnded(collection, contract, winner, amountWei, txHash, blockNumber) {
+  let tokenId = null;
+  try {
+    tokenId = await contract.totalSupply();
+  } catch {}
+
+  const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
+  const imageUrl = tokenId != null ? s3Preview(collection.name, tokenIdStr) : null;
+
+  const winnerDisplay = await formatDisplayAddress(winner);
+  const amountEth = ethers.formatEther(amountWei);
+
+  let timestampMs = Date.now();
+  try {
+    const block = await provider.getBlock(blockNumber);
+    if (block?.timestamp) timestampMs = block.timestamp * 1000;
+  } catch {}
+
+  const embed = new EmbedBuilder()
+    .setTitle("Auction Ended")
+    .setDescription(
+      [
+        `Collection: **${collection.name}**`,
+        `Artist: **${collection.artist || "Unknown"}**`,
+        `Piece: **#${tokenIdStr}**`,
+        `Winner: **${winnerDisplay}**`,
+        `Amount: **${amountEth} ETH**`,
+        ``,
+        `[View on 8NAP](${auctionViewLink(collection.name)})`,
+        `Tx: https://etherscan.io/tx/${txHash}`,
+      ].join("\n")
+    )
+    .setTimestamp(new Date(timestampMs))
+    .setFooter({ text: collection.name });
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  const channel = await client.channels.fetch(config.auctionChannelId);
+  await rateLimiter.send(channel, { embeds: [embed] });
 }
 
 // =========================
@@ -521,17 +566,67 @@ async function pollOnce() {
 
             if (tokenIdStr !== "unknown" && first) markFirstBid(addr, tokenIdStr);
           } else if (parsed.name === "Transfer") {
-            const from = parsed.args.from;
-            const to = parsed.args.to;
-            const tokenId = parsed.args.tokenId;
+  const from = parsed.args.from;
+  const to = parsed.args.to;
+  const tokenId = parsed.args.tokenId;
 
-            // only mint transfers
-            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+  // Load fresh state
+  const freshState = loadState(addr);
 
-            // Post mint to mints channel (auction settlement)
-            const mintContract = new ethers.Contract(addr, ERC721_ABI, provider);
-            await postMint(collection, "erc721", mintContract, tokenId, to, log.transactionHash, log.blockNumber, 1);
-          }
+  // === Auction settlement (placeholder transfer) ===
+  if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+    // Identify winner + price
+    let amountWei = 0n;
+    try {
+      const tx = await provider.getTransaction(log.transactionHash);
+      if (tx?.value != null) amountWei = tx.value;
+    } catch {}
+
+    // Save pending auction to disk
+    freshState.pendingAuction = {
+      winner: to,
+      settlementTx: log.transactionHash,
+      amountWei: amountWei.toString(),
+    };
+    saveState(addr, freshState);
+
+    // Post Auction Ended (NOT a mint)
+    await postAuctionEnded(
+      collection,
+      contract,
+      to,
+      amountWei,
+      log.transactionHash,
+      log.blockNumber
+    );
+
+    continue;
+  }
+
+  // === Claim transfer (real mint) ===
+  if (
+    freshState.pendingAuction &&
+    to.toLowerCase() === freshState.pendingAuction.winner.toLowerCase()
+  ) {
+    const mintContract = new ethers.Contract(addr, ERC721_ABI, provider);
+
+    await postMint(
+      collection,
+      "erc721",
+      mintContract,
+      tokenId,
+      to,
+      log.transactionHash,
+      log.blockNumber,
+      1
+    );
+
+    // Clear pending auction
+    freshState.pendingAuction = null;
+    saveState(addr, freshState);
+  }
+}
+
         }
 
         // ===== ERC721 mint-only =====
