@@ -244,6 +244,15 @@ function s3Preview(collectionName, tokenIdStr) {
   }
   return null;
 }
+async function previewExists(url) {
+  try {
+    const res = await fetch(url, { method: "HEAD" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 
 async function postAuctionEnded(collection, contract, winner, amountWei, txHash, blockNumber) {
   let tokenId = null;
@@ -252,7 +261,13 @@ async function postAuctionEnded(collection, contract, winner, amountWei, txHash,
   } catch {}
 
   const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
-  const imageUrl = tokenId != null ? s3Preview(collection.name, tokenIdStr) : null;
+  let imageUrl = null;
+if (tokenId != null) {
+  const previewUrl = s3Preview(collection.name, tokenIdStr);
+  if (previewUrl && await previewExists(previewUrl)) {
+    imageUrl = previewUrl;
+  }
+}
 
   const winnerDisplay = await formatDisplayAddress(winner);
   const amountEth = ethers.formatEther(amountWei);
@@ -401,7 +416,15 @@ async function postBid(collection, contract, bidder, amountWei, isFirstBid, txHa
   }
 
   const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
-  const imageUrl = tokenId != null ? s3Preview(collection.name, tokenIdStr) : null;
+
+let imageUrl = null;
+if (tokenId != null) {
+  const previewUrl = s3Preview(collection.name, tokenIdStr);
+  if (previewUrl && await previewExists(previewUrl)) {
+    imageUrl = previewUrl;
+  }
+}
+
 
   const bidderDisplay = await formatDisplayAddress(bidder);
   const amountEth = ethers.formatEther(amountWei);
