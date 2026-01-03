@@ -606,8 +606,10 @@ async function pollOnce() {
   // === Claim transfer (real mint) ===
   if (
     freshState.pendingAuction &&
-    to.toLowerCase() === freshState.pendingAuction.winner.toLowerCase()
-  ) {
+    from.toLowerCase() !== ZERO_ADDRESS.toLowerCase() &&
+    tokenId !== 0n
+)  {
+
     const mintContract = new ethers.Contract(addr, ERC721_ABI, provider);
 
     await postMint(
