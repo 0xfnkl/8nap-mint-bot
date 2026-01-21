@@ -80,6 +80,73 @@ function seenKey(log) {
 }
 
 // =========================
+// Mint ledger (append-only CSV, monthly files)
+// =========================
+
+const LEDGER_DIR = path.join(__dirname, "ledger");
+if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR);
+
+function monthKeyFromMs(ms) {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function ledgerPathForMonth(monthKey) {
+  return path.join(LEDGER_DIR, `mints-${monthKey}.csv`);
+}
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function ensureLedgerHeader(filePath) {
+  if (fs.existsSync(filePath)) return;
+  const header = [
+    "DateUTC",
+    "ProjectKey",
+    "Collection",
+    "Standard",
+    "Quantity",
+    "MinterWallet",
+    "ETHPrice",
+    "TokenID",
+    "Contract",
+    "TxHash",
+    "BlockNumber",
+    "LogIndex",
+  ].join(",") + "\n";
+  fs.writeFileSync(filePath, header);
+}
+
+function appendMintToLedger(row, timestampMs) {
+  const monthKey = monthKeyFromMs(timestampMs);
+  const filePath = ledgerPathForMonth(monthKey);
+  ensureLedgerHeader(filePath);
+
+  const line = [
+    row.DateUTC,
+    row.ProjectKey,
+    row.Collection,
+    row.Standard,
+    row.Quantity,
+    row.MinterWallet,
+    row.ETHPrice,
+    row.TokenID,
+    row.Contract,
+    row.TxHash,
+    row.BlockNumber,
+    row.LogIndex,
+  ].map(csvEscape).join(",") + "\n";
+
+  fs.appendFileSync(filePath, line);
+}
+
+// =========================
 // Discord client + rate limit
 // =========================
 
@@ -305,7 +372,7 @@ if (tokenId != null) {
 // Event processing (mints + auctions)
 // =========================
 
-async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, quantity) {
+async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, logIndex, quantity) {
   const tokenIdStr = tokenId.toString();
 
   // Image + title
@@ -343,6 +410,37 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
     const block = await provider.getBlock(blockNumber);
     if (block?.timestamp) timestampMs = block.timestamp * 1000;
   } catch {}
+
+    // ===== Ledger append (disk, no extra RPC) =====
+  const dateUtc = new Date(timestampMs).toISOString();
+
+  // Stable identity:
+  // - ERC721: contract
+  // - ERC1155: contract:tokenId
+  const contractLower = collection.contractAddress.toLowerCase();
+  const projectKey = (standard === "erc1155")
+    ? `${contractLower}:${tokenIdStr}`
+    : contractLower;
+
+  // Note: For ERC1155 batch mints, tx.value is total tx value, not per-token.
+  // We still record it as ETHPrice for auditability.
+  appendMintToLedger(
+    {
+      DateUTC: dateUtc,
+      ProjectKey: projectKey,
+      Collection: collection.name,
+      Standard: standard,
+      Quantity: standard === "erc1155" ? quantity.toString() : "1",
+      MinterWallet: to,
+      ETHPrice: priceEth,
+      TokenID: tokenIdStr,
+      Contract: contractLower,
+      TxHash: txHash,
+      BlockNumber: blockNumber.toString(),
+      LogIndex: (logIndex ?? "").toString(),
+    },
+    timestampMs
+  );
 
   const embed = new EmbedBuilder()
     .setTitle(title)
@@ -643,6 +741,7 @@ async function pollOnce() {
       to,
       log.transactionHash,
       log.blockNumber,
+      log.index,
       1
     );
 
@@ -662,7 +761,7 @@ async function pollOnce() {
           const tokenId = parsed.args.tokenId;
           if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-          await postMint(collection, "erc721", contract, tokenId, to, log.transactionHash, log.blockNumber, 1);
+          await postMint(collection, "erc721", contract, tokenId, to, log.transactionHash, log.blockNumber, log.index, 1);
         }
 
         // ===== ERC1155 mint-only =====
@@ -674,7 +773,7 @@ async function pollOnce() {
             const value = parsed.args.value;
             if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-            await postMint(collection, "erc1155", contract, id, to, log.transactionHash, log.blockNumber, value);
+            await postMint(collection, "erc1155", contract, id, to, log.transactionHash, log.blockNumber, log.index, value);
           } else if (parsed.name === "TransferBatch") {
             const from = parsed.args.from;
             const to = parsed.args.to;
@@ -683,7 +782,7 @@ async function pollOnce() {
             if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
             for (let i = 0; i < ids.length; i++) {
-              await postMint(collection, "erc1155", contract, ids[i], to, log.transactionHash, log.blockNumber, values[i]);
+              await postMint(collection, "erc1155", contract, ids[i], to, log.transactionHash, log.blockNumber, log.index, values[i]);
             }
           }
         }
