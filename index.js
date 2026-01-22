@@ -374,7 +374,7 @@ if (tokenIdStr !== "unknown") {
 // Event processing (mints + auctions)
 // =========================
 
-async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, quantity, overridePriceWei = null) {
+async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, logIndex, quantity, overridePriceWei = null) {
   const tokenIdStr = tokenId.toString();
 
   // Image + title
@@ -772,6 +772,7 @@ async function pollOnce() {
       to,
       log.transactionHash,
       log.blockNumber,
+      log.index,
       1,
       overridePriceWei
     );
@@ -818,10 +819,9 @@ async function pollOnce() {
           }
         }
       } catch (e) {
-        // If Discord/HTTP fails mid-event, we still keep processed=true to avoid spam loops.
-        // The cursor ensures we don’t miss later events; this trade-off prevents repeated spam on transient failures.
-        console.error(`❌ Error handling ${collection.name} ${parsed.name}:`, e.message);
-      }
+  console.error(`❌ Error handling ${collection.name} ${parsed.name}:`, e.message);
+  console.error(e); // <-- this prints stack + more details
+}
     }
 
     // advance cursor only after batch processed
@@ -845,11 +845,17 @@ async function startPolling() {
   console.log(`✅ Polling started. interval=${POLL_MS}ms confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
 
   // run immediately, then interval
-  await pollOnce().catch((e) => console.error("pollOnce error:", e.message));
+  await pollOnce().catch((e) => {
+  console.error("pollOnce error:", e.message);
+  console.error(e);
+});
 
-  pollTimer = setInterval(() => {
-    pollOnce().catch((e) => console.error("pollOnce error:", e.message));
-  }, POLL_MS);
+pollTimer = setInterval(() => {
+  pollOnce().catch((e) => {
+    console.error("pollOnce error:", e.message);
+    console.error(e);
+  });
+}, POLL_MS);
 }
 
 // Heartbeat
