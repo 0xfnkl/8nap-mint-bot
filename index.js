@@ -48,17 +48,39 @@ function stateFileFor(address) {
 function loadState(address) {
   const p = stateFileFor(address);
   if (!fs.existsSync(p)) {
-    return { lastProcessedBlock: 0, processed: {}, pendingAuction: null };
+    return {
+      lastProcessedBlock: 0,
+      processed: {},
+      pendingAuctions: {},        // tokenIdStr -> { winner, settlementTx, amountWei }
+      currentAuctionTokenId: null, // tokenIdStr (best guess of “current” live auction piece)
+      lastBidWeiByToken: {},      // tokenIdStr -> amountWeiStr
+};
 
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
-if (!parsed.pendingAuction) parsed.pendingAuction = null;
-return parsed;
+// ---- state migrations / defaults ----
+if (!parsed.pendingAuctions) parsed.pendingAuctions = {};
+if (parsed.currentAuctionTokenId === undefined) parsed.currentAuctionTokenId = null;
+if (!parsed.lastBidWeiByToken) parsed.lastBidWeiByToken = {};
+
+// migrate legacy pendingAuction -> pendingAuctions if present
+if (parsed.pendingAuction && parsed.pendingAuction.winner) {
+  // We don't know the tokenId for the legacy entry, so keep it under a special key
+  // so it doesn't crash anything. It won’t be used for claim matching.
+  parsed.pendingAuctions["_legacy"] = parsed.pendingAuction;
+}
+parsed.pendingAuction = null;
 
   } catch {
     // If state is corrupted, fail safe by starting at 0 (we’ll set it on boot)
-    return { lastProcessedBlock: 0, processed: {} };
+    return {
+  lastProcessedBlock: 0,
+  processed: {},
+  pendingAuctions: {},
+  currentAuctionTokenId: null,
+  lastBidWeiByToken: {},
+};
   }
 }
 
@@ -321,15 +343,11 @@ async function previewExists(url) {
 }
 
 
-async function postAuctionEnded(collection, contract, winner, amountWei, txHash, blockNumber) {
-  let tokenId = null;
-  try {
-    tokenId = await contract.totalSupply();
-  } catch {}
+async function postAuctionEnded(collection, tokenIdStr, winner, amountWei, txHash, blockNumber) {
 
   const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
   let imageUrl = null;
-if (tokenId != null) {
+if (tokenIdStr !== "unknown") {
   const previewUrl = s3Preview(collection.name, tokenIdStr);
   if (previewUrl && await previewExists(previewUrl)) {
     imageUrl = previewUrl;
@@ -372,7 +390,7 @@ if (tokenId != null) {
 // Event processing (mints + auctions)
 // =========================
 
-async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, logIndex, quantity) {
+async function postMint(collection, standard, contract, tokenId, to, txHash, blockNumber, quantity, overridePriceWei = null) {
   const tokenIdStr = tokenId.toString();
 
   // Image + title
@@ -387,12 +405,16 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
     if (metadata?.image) imageUrl = normalizeUri(metadata.image);
   }
 
-  // tx value
-  let priceEth = "0";
-  try {
+// tx value (or override)
+let priceEth = "0";
+try {
+  if (overridePriceWei != null) {
+    priceEth = ethers.formatEther(overridePriceWei);
+  } else {
     const tx = await provider.getTransaction(txHash);
     if (tx?.value != null) priceEth = ethers.formatEther(tx.value);
-  } catch {}
+  }
+} catch {}
 
   let priceLine = `Price: **${priceEth} ETH**`;
   const ethUsd = await getEthPriceUsd();
@@ -468,17 +490,9 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
   await rateLimiter.send(channel, { embeds: [embed] });
 }
 
-async function postPieceRevealed(collection, contract, txHash, blockNumber) {
-  // Correct token id source: totalSupply after reveal
-  let tokenId = null;
-  try {
-    tokenId = await contract.totalSupply();
-  } catch {
-    tokenId = null;
-  }
+async function postPieceRevealed(collection, tokenIdStr, txHash, blockNumber) {
 
-  const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
-  const imageUrl = tokenId != null ? s3Preview(collection.name, tokenIdStr) : null;
+  const imageUrl = tokenIdStr !== "unknown" ? s3Preview(collection.name, tokenIdStr) : null;
 
   let timestampMs = Date.now();
   try {
@@ -509,24 +523,17 @@ async function postPieceRevealed(collection, contract, txHash, blockNumber) {
   await rateLimiter.send(channel, { embeds: [embed] });
 }
 
-async function postBid(collection, contract, bidder, amountWei, isFirstBid, txHash, blockNumber) {
-  let tokenId = null;
-  try {
-    tokenId = await contract.totalSupply();
-  } catch {
-    tokenId = null;
-  }
-
-  const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
+async function postBid(collection, tokenIdStr, bidder, amountWei, isFirstBid, txHash, blockNumber) {
 
 let imageUrl = null;
-if (tokenId != null) {
+if (tokenIdStr !== "unknown") {
   const previewUrl = s3Preview(collection.name, tokenIdStr);
-  if (previewUrl && await previewExists(previewUrl)) {
-    imageUrl = previewUrl;
+  if (previewUrl) {
+    try {
+      if (await previewExists(previewUrl)) imageUrl = previewUrl;
+    } catch {}
   }
 }
-
 
   const bidderDisplay = await formatDisplayAddress(bidder);
   const amountEth = ethers.formatEther(amountWei);
@@ -672,55 +679,92 @@ async function pollOnce() {
         // ===== Auction (Issues/Metamorphosis) =====
         if (standard === "erc721" && isAuction) {
           if (parsed.name === "PieceRevealed") {
-            await postPieceRevealed(collection, contract, log.transactionHash, log.blockNumber);
-          } else if (parsed.name === "NewBidPlaced") {
-            const bidStruct = parsed.args.bid;
-            const bidder = bidStruct.bidder;
-            const amount = bidStruct.amount;
+            const freshState = loadState(addr);
 
-            // determine tokenId via totalSupply (current live piece)
-            let tokenIdNow = null;
-            try {
-              tokenIdNow = await contract.totalSupply();
-            } catch {}
+          let tokenIdNow = null;
+          try {
+            tokenIdNow = await contract.totalSupply({ blockTag: log.blockNumber });
+          } catch {}
 
-            const tokenIdStr = tokenIdNow != null ? tokenIdNow.toString() : "unknown";
-            const first = tokenIdStr !== "unknown" ? !hasFirstBid(addr, tokenIdStr) : false;
+          const tokenIdStr = tokenIdNow != null ? tokenIdNow.toString() : "unknown";
 
-            await postBid(collection, contract, bidder, amount, first, log.transactionHash, log.blockNumber);
+          // track the current auction piece deterministically
+          freshState.currentAuctionTokenId = tokenIdStr !== "unknown" ? tokenIdStr : freshState.currentAuctionTokenId;
+          saveState(addr, freshState);
 
-            if (tokenIdStr !== "unknown" && first) markFirstBid(addr, tokenIdStr);
-          } else if (parsed.name === "Transfer") {
+          await postPieceRevealed(collection, tokenIdStr, log.transactionHash, log.blockNumber);
+      } else if (parsed.name === "NewBidPlaced") {
+  const bidStruct = parsed.args.bid;
+  const bidder = bidStruct.bidder;
+  const amount = bidStruct.amount;
+
+  const freshState = loadState(addr);
+
+  // Determine tokenId for the bid:
+  // Prefer last revealed tokenId; fallback to totalSupply at the log's block.
+  let tokenIdStr = freshState.currentAuctionTokenId;
+
+  if (!tokenIdStr) {
+    try {
+      const t = await contract.totalSupply({ blockTag: log.blockNumber });
+      tokenIdStr = t.toString();
+      freshState.currentAuctionTokenId = tokenIdStr;
+    } catch {
+      tokenIdStr = "unknown";
+    }
+  }
+
+  // Save highest bid for that tokenId (this is what we’ll use for ledger price)
+  if (tokenIdStr !== "unknown") {
+    freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
+    saveState(addr, freshState);
+  }
+
+  const first = tokenIdStr !== "unknown" ? !hasFirstBid(addr, tokenIdStr) : false;
+
+  await postBid(collection, tokenIdStr, bidder, amount, first, log.transactionHash, log.blockNumber);
+
+  if (tokenIdStr !== "unknown" && first) markFirstBid(addr, tokenIdStr);
+} else if (parsed.name === "Transfer") {
   const from = parsed.args.from;
   const to = parsed.args.to;
   const tokenId = parsed.args.tokenId;
+  const tokenIdStr = tokenId.toString();
 
-  // Load fresh state
   const freshState = loadState(addr);
 
-  // === Auction settlement (placeholder transfer) ===
+  // === Auction settlement placeholder (NOT the real mint) ===
+  // This is the transfer from ZERO_ADDRESS in the auction contract behavior
   if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
-    // Identify winner + price
-    let amountWei = 0n;
-    try {
-      const tx = await provider.getTransaction(log.transactionHash);
-      if (tx?.value != null) amountWei = tx.value;
-    } catch {}
 
-    // Save pending auction to disk
-    freshState.pendingAuction = {
+    // Use highest known bid for this token (from NewBidPlaced), fallback to tx.value (usually 0)
+    let amountWeiStr = freshState.lastBidWeiByToken?.[tokenIdStr] || null;
+
+    if (!amountWeiStr) {
+      try {
+        const tx = await provider.getTransaction(log.transactionHash);
+        if (tx?.value != null) amountWeiStr = tx.value.toString();
+      } catch {}
+    }
+    if (!amountWeiStr) amountWeiStr = "0";
+
+    // Store pending auction by tokenId (supports many simultaneous unclaimed wins)
+    freshState.pendingAuctions[tokenIdStr] = {
       winner: to,
       settlementTx: log.transactionHash,
-      amountWei: amountWei.toString(),
+      amountWei: amountWeiStr,
     };
+
+    // keep currentAuctionTokenId aligned
+    freshState.currentAuctionTokenId = tokenIdStr;
     saveState(addr, freshState);
 
-    // Post Auction Ended (NOT a mint)
+    // Post "Auction Ended"
     await postAuctionEnded(
       collection,
-      contract,
+      tokenIdStr,
       to,
-      amountWei,
+      BigInt(amountWeiStr),
       log.transactionHash,
       log.blockNumber
     );
@@ -728,14 +772,13 @@ async function pollOnce() {
     continue;
   }
 
-  // === Claim transfer (real mint) ===
-  if (
-    freshState.pendingAuction &&
-    from.toLowerCase() !== ZERO_ADDRESS.toLowerCase() &&
-    tokenId !== 0n
-)  {
-
+  // === Claim transfer (REAL mint) ===
+  // This is the transfer that happens when winner claims and token actually becomes theirs.
+  const pending = freshState.pendingAuctions?.[tokenIdStr];
+  if (pending) {
     const mintContract = new ethers.Contract(addr, ERC721_ABI, provider);
+
+    const overridePriceWei = pending.amountWei ? BigInt(pending.amountWei) : null;
 
     await postMint(
       collection,
@@ -745,12 +788,12 @@ async function pollOnce() {
       to,
       log.transactionHash,
       log.blockNumber,
-      log.index,
-      1
+      1,
+      overridePriceWei
     );
 
-    // Clear pending auction
-    freshState.pendingAuction = null;
+    // clear pending for this tokenId only
+    delete freshState.pendingAuctions[tokenIdStr];
     saveState(addr, freshState);
   }
 }
