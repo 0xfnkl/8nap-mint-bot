@@ -2,7 +2,7 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, REST, Routes, SlashCommandBuilder } = require("discord.js");
 const { ethers } = require("ethers");
 
 // =========================
@@ -35,15 +35,13 @@ const MAX_BLOCK_RANGE = Number(process.env.MAX_BLOCK_RANGE || 5); // <= 10 for A
 const provider = new ethers.JsonRpcProvider(process.env.RPC_HTTP_URL);
 
 // =========================
-// State persistence (disk)
+// Persistent data dir (Railway Volume should mount to /data)
 // =========================
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
-const STATE_DIR = path.join(__dirname, "state");
+const STATE_DIR = path.join(DATA_DIR, "state");
 if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR);
-
-function stateFileFor(address) {
-  return path.join(STATE_DIR, `${address.toLowerCase()}.json`);
-}
 
 function loadState(address) {
   const fallback = { lastProcessedBlock: 0, processed: {}, pendingAuction: null };
@@ -87,10 +85,31 @@ function seenKey(log) {
 }
 
 // =========================
+// Ledger monthly post state (separate from per-contract state)
+// =========================
+
+const LEDGER_POST_STATE_PATH = path.join(STATE_DIR, "ledger_post_state.json");
+
+function loadLedgerPostState() {
+  try {
+    if (!fs.existsSync(LEDGER_POST_STATE_PATH)) return { posted: {} };
+    const parsed = JSON.parse(fs.readFileSync(LEDGER_POST_STATE_PATH, "utf8"));
+    if (!parsed.posted || typeof parsed.posted !== "object") parsed.posted = {};
+    return parsed;
+  } catch {
+    return { posted: {} };
+  }
+}
+
+function saveLedgerPostState(st) {
+  fs.writeFileSync(LEDGER_POST_STATE_PATH, JSON.stringify(st, null, 2));
+}
+
+// =========================
 // Mint ledger (append-only CSV, monthly files)
 // =========================
 
-const LEDGER_DIR = path.join(__dirname, "ledger");
+const LEDGER_DIR = path.join(DATA_DIR, "ledger");
 if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR);
 
 function monthKeyFromMs(ms) {
@@ -102,6 +121,18 @@ function monthKeyFromMs(ms) {
 
 function ledgerPathForMonth(monthKey) {
   return path.join(LEDGER_DIR, `mints-${monthKey}.csv`);
+}
+
+function prevMonthKeyFromMs(ms) {
+  const d = new Date(ms);
+  let y = d.getUTCFullYear();
+  let m = d.getUTCMonth() + 1; // 1..12
+  m -= 1;
+  if (m === 0) {
+    m = 12;
+    y -= 1;
+  }
+  return `${y}-${String(m).padStart(2, "0")}`;
 }
 
 function csvEscape(v) {
@@ -171,6 +202,70 @@ const rateLimiter = {
     this.lastSent = Date.now();
   },
 };
+
+client.on("interactionCreate", async (interaction) => {
+  try {
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName !== "ledgercsv") return;
+
+    // optional arg: month like "2026-01"
+    const month = interaction.options.getString("month");
+
+    const monthKey = month && /^\d{4}-\d{2}$/.test(month)
+      ? month
+      : monthKeyFromMs(Date.now()); // current month by default
+
+    const filePath = ledgerPathForMonth(monthKey);
+
+    if (!fs.existsSync(filePath)) {
+      await interaction.reply({
+        content: `No ledger file found for ${monthKey}.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // Discord requires a file attachment object
+    const attachment = { attachment: filePath, name: `mints-${monthKey}.csv` };
+
+    await interaction.reply({
+      content: `Here you go: mints-${monthKey}.csv`,
+      files: [attachment],
+      ephemeral: true, // only you see it (change to false if you want public)
+    });
+  } catch (e) {
+    console.error("interactionCreate error:", e?.message || e);
+    console.error(e);
+    // if interaction already replied, followUp, else reply
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: "Error generating ledger CSV.", ephemeral: true });
+      } else {
+        await interaction.reply({ content: "Error generating ledger CSV.", ephemeral: true });
+      }
+    } catch {}
+  }
+});
+
+async function postLedgerCsvForMonth(monthKey, channelId) {
+  const filePath = ledgerPathForMonth(monthKey);
+  if (!fs.existsSync(filePath)) {
+    console.log(`📄 No ledger file found for ${monthKey} at ${filePath}`);
+    return false;
+  }
+
+  const channel = await client.channels.fetch(channelId);
+  const { AttachmentBuilder } = require("discord.js");
+  const attachment = new AttachmentBuilder(filePath, { name: `mints-${monthKey}.csv` });
+
+  await rateLimiter.send(channel, {
+    content: `Monthly mint ledger CSV for **${monthKey}**`,
+    files: [attachment],
+  });
+
+  console.log(`✅ Posted ledger CSV for ${monthKey} -> channel ${channelId}`);
+  return true;
+}
 
 // =========================
 // ABIs
@@ -830,6 +925,37 @@ async function pollOnce() {
   }
 }
 
+async function registerCommands() {
+  // Guild-scoped is instant. Global can take a long time to appear.
+  const guildId = process.env.GUILD_ID;
+  if (!guildId) {
+    console.log("⚠️ GUILD_ID not set. Skipping slash command registration.");
+    return;
+  }
+
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("ledgercsv")
+      .setDescription("Download a monthly mint ledger CSV")
+      .addStringOption((opt) =>
+        opt
+          .setName("month")
+          .setDescription("Month key in YYYY-MM (example: 2026-01). Defaults to current month.")
+          .setRequired(false)
+      )
+      .toJSON(),
+  ];
+
+  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_BOT_TOKEN);
+
+  await rest.put(
+    Routes.applicationGuildCommands(client.user.id, guildId),
+    { body: commands }
+  );
+
+  console.log("✅ Slash commands registered for guild:", guildId);
+}
+
 // =========================
 // Startup + loop
 // =========================
@@ -877,12 +1003,51 @@ async function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
+const LEDGER_CSV_CHANNEL_ID = process.env.LEDGER_CSV_CHANNEL_ID || "1463682240671387952";
+
+async function runMonthlyLedgerPosterTick() {
+  // Use UTC to avoid DST/timezone stupidity.
+  const now = new Date();
+  const day = now.getUTCDate();
+  if (day !== 1) return;
+
+  const prevMonthKey = prevMonthKeyFromMs(Date.now());
+  const st = loadLedgerPostState();
+
+  if (st.posted[prevMonthKey]) return; // already posted
+
+  const ok = await postLedgerCsvForMonth(prevMonthKey, LEDGER_CSV_CHANNEL_ID);
+  if (ok) {
+    st.posted[prevMonthKey] = new Date().toISOString();
+    saveLedgerPostState(st);
+  }
+}
+
 client.once("clientReady", async () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
   try {
+    // 3C.2: register slash commands on boot
+    await registerCommands();
+
     await startPolling();
+
+    // Start monthly poster (runs shortly after boot, then every 5 minutes)
+    setTimeout(() => {
+      runMonthlyLedgerPosterTick().catch((e) => {
+        console.error("ledger poster tick error:", e.message);
+        console.error(e);
+      });
+    }, 5000);
+
+    setInterval(() => {
+      runMonthlyLedgerPosterTick().catch((e) => {
+        console.error("ledger poster tick error:", e.message);
+        console.error(e);
+      });
+    }, 5 * 60 * 1000);
   } catch (e) {
-    console.error("❌ Failed to start polling:", e.message);
+    console.error("❌ Failed to start bot:", e.message);
+    console.error(e);
     process.exit(1);
   }
 });
