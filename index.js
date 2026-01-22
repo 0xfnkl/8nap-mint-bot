@@ -43,8 +43,19 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 const STATE_DIR = path.join(DATA_DIR, "state");
 if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR);
 
+function stateFileFor(address) {
+  return path.join(STATE_DIR, `${address.toLowerCase()}.json`);
+}
+
 function loadState(address) {
-  const fallback = { lastProcessedBlock: 0, processed: {}, pendingAuction: null };
+  const fallback = {
+  lastProcessedBlock: 0,
+  processed: {},
+  pendingAuctions: {},         // tokenIdStr -> { winner, settlementTx, amountWei }
+  currentAuctionTokenId: null, // tokenIdStr
+  lastBidWeiByToken: {},       // tokenIdStr -> amountWeiStr
+};
+
 
   try {
     if (!address) return { ...fallback };
@@ -57,8 +68,18 @@ function loadState(address) {
 
     // normalize shape
     if (typeof parsed.lastProcessedBlock !== "number") parsed.lastProcessedBlock = 0;
-    if (!parsed.processed || typeof parsed.processed !== "object") parsed.processed = {};
-    if (!("pendingAuction" in parsed)) parsed.pendingAuction = null;
+if (!parsed.processed || typeof parsed.processed !== "object") parsed.processed = {};
+
+if (!parsed.pendingAuctions) parsed.pendingAuctions = {};
+if (parsed.currentAuctionTokenId === undefined) parsed.currentAuctionTokenId = null;
+if (!parsed.lastBidWeiByToken) parsed.lastBidWeiByToken = {};
+
+// migrate legacy pendingAuction -> pendingAuctions if present
+if (parsed.pendingAuction && parsed.pendingAuction.winner) {
+  parsed.pendingAuctions["__legacy"] = parsed.pendingAuction;
+}
+parsed.pendingAuction = null;
+
 
     return parsed;
   } catch (e) {
