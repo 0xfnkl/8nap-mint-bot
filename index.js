@@ -345,7 +345,6 @@ async function previewExists(url) {
 
 async function postAuctionEnded(collection, tokenIdStr, winner, amountWei, txHash, blockNumber) {
 
-  const tokenIdStr = tokenId != null ? tokenId.toString() : "unknown";
   let imageUrl = null;
 if (tokenIdStr !== "unknown") {
   const previewUrl = s3Preview(collection.name, tokenIdStr);
