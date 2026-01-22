@@ -46,41 +46,26 @@ function stateFileFor(address) {
 }
 
 function loadState(address) {
-  const p = stateFileFor(address);
-  if (!fs.existsSync(p)) {
-    return {
-      lastProcessedBlock: 0,
-      processed: {},
-      pendingAuctions: {},        // tokenIdStr -> { winner, settlementTx, amountWei }
-      currentAuctionTokenId: null, // tokenIdStr (best guess of “current” live auction piece)
-      lastBidWeiByToken: {},      // tokenIdStr -> amountWeiStr
-};
+  const fallback = { lastProcessedBlock: 0, processed: {}, pendingAuction: null };
 
-  }
   try {
-    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
-// ---- state migrations / defaults ----
-if (!parsed.pendingAuctions) parsed.pendingAuctions = {};
-if (parsed.currentAuctionTokenId === undefined) parsed.currentAuctionTokenId = null;
-if (!parsed.lastBidWeiByToken) parsed.lastBidWeiByToken = {};
+    if (!address) return { ...fallback };
 
-// migrate legacy pendingAuction -> pendingAuctions if present
-if (parsed.pendingAuction && parsed.pendingAuction.winner) {
-  // We don't know the tokenId for the legacy entry, so keep it under a special key
-  // so it doesn't crash anything. It won’t be used for claim matching.
-  parsed.pendingAuctions["_legacy"] = parsed.pendingAuction;
-}
-parsed.pendingAuction = null;
+    const p = stateFileFor(address);
+    if (!fs.existsSync(p)) return { ...fallback };
 
-  } catch {
-    // If state is corrupted, fail safe by starting at 0 (we’ll set it on boot)
-    return {
-  lastProcessedBlock: 0,
-  processed: {},
-  pendingAuctions: {},
-  currentAuctionTokenId: null,
-  lastBidWeiByToken: {},
-};
+    const raw = fs.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+
+    // normalize shape
+    if (typeof parsed.lastProcessedBlock !== "number") parsed.lastProcessedBlock = 0;
+    if (!parsed.processed || typeof parsed.processed !== "object") parsed.processed = {};
+    if (!("pendingAuction" in parsed)) parsed.pendingAuction = null;
+
+    return parsed;
+  } catch (e) {
+    console.error(`❌ loadState failed for ${address}:`, e.message);
+    return { ...fallback };
   }
 }
 
