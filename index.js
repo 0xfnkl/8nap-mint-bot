@@ -442,6 +442,10 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
     timestampMs
   );
 
+  console.log(
+  `📒 Ledger append OK: ${collection.name} tokenId=${tokenIdStr} projectKey=${projectKey} month=${monthKeyFromMs(timestampMs)}`
+  );
+
   const embed = new EmbedBuilder()
     .setTitle(title)
     .setDescription(
