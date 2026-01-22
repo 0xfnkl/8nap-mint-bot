@@ -601,7 +601,7 @@ async function pollOnce() {
 
     const addr = collection.contractAddress;
     const standard = collection.standard.toLowerCase();
-
+    console.log(`[pollOnce] collection=${collection.name} addr=${addr}`);
     const st = loadState(addr);
     const fromBlock = st.lastProcessedBlock + 1;
     if (fromBlock > safeHead) continue;
