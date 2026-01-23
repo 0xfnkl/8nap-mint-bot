@@ -565,8 +565,9 @@ try {
   );
 
   console.log(
-  `📒 Ledger append OK: ${collection.name} tokenId=${tokenIdStr} projectKey=${projectKey} month=${monthKeyFromMs(timestampMs)}`
-  );
+  `📒 Ledger append OK: ${collection.name} tokenId=${tokenIdStr} projectKey=${projectKey}`
+);
+
 
   const embed = new EmbedBuilder()
     .setTitle(title)
