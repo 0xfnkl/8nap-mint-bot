@@ -247,14 +247,17 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // Discord requires a file attachment object
-    const attachment = { attachment: filePath, name: `mints-${monthKey}.csv` };
+   // Discord requires a file attachment object
+const attachment = { attachment: filePath, name: `mints-${monthKey}.csv` };
 
-    await interaction.reply({
+// Acknowledge fast so Discord doesn't timeout
+await interaction.deferReply({ ephemeral: true });
+
+await interaction.editReply({
   content: `Here you go: mints-${monthKey}.csv`,
   files: [attachment],
-  flags: MessageFlags.Ephemeral,
 });
+
   } catch (e) {
     console.error("interactionCreate error:", e?.message || e);
     console.error(e);
@@ -263,13 +266,15 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.replied || interaction.deferred) {
       await interaction.followUp({
   content: "Error generating ledger CSV.",
-  flags: MessageFlags.Ephemeral,
+  ephemeral: true,
 });
+
       } else {
         await interaction.reply({
   content: "Error generating ledger CSV.",
-  flags: MessageFlags.Ephemeral,
+  ephemeral: true,
 });
+
       }
     } catch {}
   }
