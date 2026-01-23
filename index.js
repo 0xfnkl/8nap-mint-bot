@@ -130,8 +130,9 @@ function saveLedgerPostState(st) {
 // Mint ledger (append-only CSV, monthly files)
 // =========================
 
+// Ledger directory should live on the persistent volume (DATA_DIR)
 const LEDGER_DIR = path.join(DATA_DIR, "ledger");
-if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR);
+if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR, { recursive: true });
 
 function monthKeyFromMs(ms) {
   const d = new Date(ms);
@@ -250,19 +251,25 @@ client.on("interactionCreate", async (interaction) => {
     const attachment = { attachment: filePath, name: `mints-${monthKey}.csv` };
 
     await interaction.reply({
-      content: `Here you go: mints-${monthKey}.csv`,
-      files: [attachment],
-      ephemeral: true, // only you see it (change to false if you want public)
-    });
+  content: `Here you go: mints-${monthKey}.csv`,
+  files: [attachment],
+  flags: MessageFlags.Ephemeral,
+});
   } catch (e) {
     console.error("interactionCreate error:", e?.message || e);
     console.error(e);
     // if interaction already replied, followUp, else reply
     try {
       if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: "Error generating ledger CSV.", ephemeral: true });
+      await interaction.followUp({
+  content: "Error generating ledger CSV.",
+  flags: MessageFlags.Ephemeral,
+});
       } else {
-        await interaction.reply({ content: "Error generating ledger CSV.", ephemeral: true });
+        await interaction.reply({
+  content: "Error generating ledger CSV.",
+  flags: MessageFlags.Ephemeral,
+});
       }
     } catch {}
   }
