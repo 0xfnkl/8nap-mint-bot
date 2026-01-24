@@ -54,8 +54,8 @@ function loadState(address) {
   pendingAuctions: {},         // tokenIdStr -> { winner, settlementTx, amountWei }
   currentAuctionTokenId: null, // tokenIdStr
   lastBidWeiByToken: {},       // tokenIdStr -> amountWeiStr
+  lastBidderByToken: {},       // tokenIdStr -> bidder address
 };
-
 
   try {
     if (!address) return { ...fallback };
@@ -73,6 +73,7 @@ if (!parsed.processed || typeof parsed.processed !== "object") parsed.processed 
 if (!parsed.pendingAuctions) parsed.pendingAuctions = {};
 if (parsed.currentAuctionTokenId === undefined) parsed.currentAuctionTokenId = null;
 if (!parsed.lastBidWeiByToken) parsed.lastBidWeiByToken = {};
+if (!parsed.lastBidderByToken) parsed.lastBidderByToken = {};
 
 // migrate legacy pendingAuction -> pendingAuctions if present
 if (parsed.pendingAuction && parsed.pendingAuction.winner) {
@@ -705,6 +706,16 @@ async function initializeStateToHeadIfEmpty(collection) {
   }
 }
 
+function tokenIdFromTotalSupply(totalSupplyValue) {
+  // Many ERC721s use 0-based tokenIds, so tokenId is usually totalSupply - 1
+  try {
+    const n = BigInt(totalSupplyValue.toString());
+    return (n > 0n ? n - 1n : 0n).toString();
+  } catch {
+    return "unknown";
+  }
+}
+
 async function pollOnce() {
   const head = await provider.getBlockNumber();
   const safeHead = head - CONFIRMATIONS;
@@ -820,24 +831,33 @@ async function pollOnce() {
   if (!tokenIdStr) {
     try {
       const t = await contract.totalSupply({ blockTag: log.blockNumber });
-      tokenIdStr = t.toString();
+      tokenIdStr = tokenIdFromTotalSupply(t);
+
       freshState.currentAuctionTokenId = tokenIdStr;
     } catch {
       tokenIdStr = "unknown";
     }
   }
 
-  // Save highest bid for that tokenId (this is what we’ll use for ledger price)
-  if (tokenIdStr !== "unknown") {
-    freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
-    saveState(addr, freshState);
-  }
+// Compute first-bid BEFORE overwriting state.
+// First bid is always exactly 0.1 ETH for your auctions.
+const prevBidWeiStr = tokenIdStr !== "unknown"
+  ? (freshState.lastBidWeiByToken[tokenIdStr] ?? null)
+  : null;
 
-  const first = tokenIdStr !== "unknown" ? !hasFirstBid(addr, tokenIdStr) : false;
+const FIRST_BID_WEI = ethers.parseEther("0.1");
+const first = (tokenIdStr !== "unknown")
+  ? (BigInt(amount.toString()) === FIRST_BID_WEI && !prevBidWeiStr)
+  : false;
 
-  await postBid(collection, tokenIdStr, bidder, amount, first, log.transactionHash, log.blockNumber);
+// Now persist the latest/highest bid
+if (tokenIdStr !== "unknown") {
+  freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
+  saveState(addr, freshState);
+}
 
-  if (tokenIdStr !== "unknown" && first) markFirstBid(addr, tokenIdStr);
+await postBid(collection, tokenIdStr, bidder, amount, first, log.transactionHash, log.blockNumber);
+
 } else if (parsed.name === "Transfer") {
   const from = parsed.args.from;
   const to = parsed.args.to;
@@ -850,40 +870,58 @@ async function pollOnce() {
   // This is the transfer from ZERO_ADDRESS in the auction contract behavior
   if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
 
-    // Use highest known bid for this token (from NewBidPlaced), fallback to tx.value (usually 0)
-    let amountWeiStr = freshState.lastBidWeiByToken?.[tokenIdStr] || null;
+  // The auction house "settlement placeholder" Transfer often has a useless tokenId (commonly 0).
+  // We must resolve the real auction tokenId from our persisted state.
+  const seenTokenIdStr = tokenIdStr;
+  let resolvedTokenIdStr = seenTokenIdStr;
 
-    if (!amountWeiStr) {
-      try {
-        const tx = await provider.getTransaction(log.transactionHash);
-        if (tx?.value != null) amountWeiStr = tx.value.toString();
-      } catch {}
-    }
-    if (!amountWeiStr) amountWeiStr = "0";
-
-    // Store pending auction by tokenId (supports many simultaneous unclaimed wins)
-    freshState.pendingAuctions[tokenIdStr] = {
-      winner: to,
-      settlementTx: log.transactionHash,
-      amountWei: amountWeiStr,
-    };
-
-    // keep currentAuctionTokenId aligned
-    freshState.currentAuctionTokenId = tokenIdStr;
-    saveState(addr, freshState);
-
-    // Post "Auction Ended"
-    await postAuctionEnded(
-      collection,
-      tokenIdStr,
-      to,
-      BigInt(amountWeiStr),
-      log.transactionHash,
-      log.blockNumber
-    );
-
-    continue;
+  // If this tokenId doesn't map to a known bid, prefer currentAuctionTokenId from state.
+  if (resolvedTokenIdStr === "0" || !freshState.lastBidWeiByToken?.[resolvedTokenIdStr]) {
+    if (freshState.currentAuctionTokenId) resolvedTokenIdStr = freshState.currentAuctionTokenId;
   }
+
+  // Final fallback: infer something at this block height (best-effort)
+  if (!resolvedTokenIdStr || resolvedTokenIdStr === "0") {
+    try {
+      const supplyNow = await contract.totalSupply({ blockTag: log.blockNumber });
+      if (supplyNow != null) resolvedTokenIdStr = supplyNow.toString();
+    } catch {}
+  }
+
+  // Use highest known bid for the resolved tokenId, fallback to tx.value (usually 0)
+  let amountWeiStr = freshState.lastBidWeiByToken?.[resolvedTokenIdStr] || null;
+
+  if (!amountWeiStr) {
+    try {
+      const tx = await provider.getTransaction(log.transactionHash);
+      if (tx?.value != null) amountWeiStr = tx.value.toString();
+    } catch {}
+  }
+  if (!amountWeiStr) amountWeiStr = "0";
+
+  // Store pending auction by resolved tokenId
+  freshState.pendingAuctions[resolvedTokenIdStr] = {
+    winner: to,
+    settlementTx: log.transactionHash,
+    amountWei: amountWeiStr,
+  };
+
+  // keep currentAuctionTokenId aligned to resolved id
+  freshState.currentAuctionTokenId = resolvedTokenIdStr;
+  saveState(addr, freshState);
+
+  // Post "Auction Ended" using resolved tokenId + final bid
+  await postAuctionEnded(
+    collection,
+    resolvedTokenIdStr,
+    to,
+    BigInt(amountWeiStr),
+    log.transactionHash,
+    log.blockNumber
+  );
+
+  continue;
+}
 
   // === Claim transfer (REAL mint) ===
   // This is the transfer that happens when winner claims and token actually becomes theirs.
