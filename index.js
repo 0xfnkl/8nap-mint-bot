@@ -824,20 +824,24 @@ async function pollOnce() {
 
   const freshState = loadState(addr);
 
-  // Determine tokenId for the bid:
-  // Prefer last revealed tokenId; fallback to totalSupply at the log's block.
-  let tokenIdStr = freshState.currentAuctionTokenId;
+  // Determine tokenId for the bid (must be correct even if NewBidPlaced happens before PieceRevealed)
+let tokenIdStr = "unknown";
 
-  if (!tokenIdStr) {
-    try {
-      const t = await contract.totalSupply({ blockTag: log.blockNumber });
-      tokenIdStr = tokenIdFromTotalSupply(t);
+// Best source of truth: totalSupply at this block
+try {
+  const t = await contract.totalSupply({ blockTag: log.blockNumber });
+  tokenIdStr = tokenIdFromTotalSupply(t);
+} catch {}
 
-      freshState.currentAuctionTokenId = tokenIdStr;
-    } catch {
-      tokenIdStr = "unknown";
-    }
-  }
+// Fallback: if totalSupply fails, use whatever we last knew
+if (tokenIdStr === "unknown") {
+  tokenIdStr = freshState.currentAuctionTokenId || "unknown";
+}
+
+// Keep state aligned
+if (tokenIdStr !== "unknown") {
+  freshState.currentAuctionTokenId = tokenIdStr;
+}
 
 // Compute first-bid BEFORE overwriting state.
 // First bid is always exactly 0.1 ETH for your auctions.
