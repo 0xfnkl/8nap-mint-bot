@@ -686,16 +686,6 @@ if (tokenIdStr !== "unknown") {
 // Polling engine
 // =========================
 
-// Track first bid per tokenId per collection (in-memory is fine; correctness comes from logs + dedupe)
-const firstBidSeen = new Map(); // key: `${collectionAddress}-${tokenIdStr}` -> true
-
-function markFirstBid(collectionAddress, tokenIdStr) {
-  firstBidSeen.set(`${collectionAddress.toLowerCase()}-${tokenIdStr}`, true);
-}
-function hasFirstBid(collectionAddress, tokenIdStr) {
-  return firstBidSeen.has(`${collectionAddress.toLowerCase()}-${tokenIdStr}`);
-}
-
 async function initializeStateToHeadIfEmpty(collection) {
   const st = loadState(collection.contractAddress);
   if (!st.lastProcessedBlock || st.lastProcessedBlock === 0) {
@@ -824,43 +814,51 @@ async function pollOnce() {
 
   const freshState = loadState(addr);
 
-  // Determine tokenId for the bid (must be correct even if NewBidPlaced happens before PieceRevealed)
-let tokenIdStr = "unknown";
+  // Determine tokenId for this bid.
+  // Key idea:
+  // - totalSupply at this block is the best guess for "current auction token"
+  // - this avoids ordering issues when bid + reveal happen close together
+  let tokenIdStr = freshState.currentAuctionTokenId || "unknown";
+  try {
+    const t = await contract.totalSupply({ blockTag: log.blockNumber });
+    const fromSupply = tokenIdFromTotalSupply(t);
+    if (fromSupply) tokenIdStr = fromSupply;
+  } catch {}
 
-// Best source of truth: totalSupply at this block
-try {
-  const t = await contract.totalSupply({ blockTag: log.blockNumber });
-  tokenIdStr = tokenIdFromTotalSupply(t);
-} catch {}
+  // Keep current token aligned if we learned something better
+  if (tokenIdStr !== "unknown") {
+    freshState.currentAuctionTokenId = tokenIdStr;
+  }
 
-// Fallback: if totalSupply fails, use whatever we last knew
-if (tokenIdStr === "unknown") {
-  tokenIdStr = freshState.currentAuctionTokenId || "unknown";
+  // First-bid detection MUST be persistent, not in-memory.
+  // First bid is exactly 0.1 ETH AND we have no previous bid stored for this token.
+  const prevBidWeiStr =
+    tokenIdStr !== "unknown" ? (freshState.lastBidWeiByToken?.[tokenIdStr] ?? null) : null;
+
+  const FIRST_BID_WEI = ethers.parseEther("0.1");
+  const isFirstBid =
+    tokenIdStr !== "unknown" &&
+    prevBidWeiStr == null &&
+    BigInt(amount.toString()) === FIRST_BID_WEI;
+
+  // Persist latest/highest bid for this token (used later for Auction Ended + ledger price)
+  if (tokenIdStr !== "unknown") {
+    freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
+    saveState(addr, freshState);
+  }
+
+  await postBid(
+    collection,
+    tokenIdStr,
+    bidder,
+    amount,
+    isFirstBid,
+    log.transactionHash,
+    log.blockNumber
+  );
+
+  continue;
 }
-
-// Keep state aligned
-if (tokenIdStr !== "unknown") {
-  freshState.currentAuctionTokenId = tokenIdStr;
-}
-
-// Compute first-bid BEFORE overwriting state.
-// First bid is always exactly 0.1 ETH for your auctions.
-const prevBidWeiStr = tokenIdStr !== "unknown"
-  ? (freshState.lastBidWeiByToken[tokenIdStr] ?? null)
-  : null;
-
-const FIRST_BID_WEI = ethers.parseEther("0.1");
-const first = (tokenIdStr !== "unknown")
-  ? (BigInt(amount.toString()) === FIRST_BID_WEI && !prevBidWeiStr)
-  : false;
-
-// Now persist the latest/highest bid
-if (tokenIdStr !== "unknown") {
-  freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
-  saveState(addr, freshState);
-}
-
-await postBid(collection, tokenIdStr, bidder, amount, first, log.transactionHash, log.blockNumber);
 
 } else if (parsed.name === "Transfer") {
   const from = parsed.args.from;
