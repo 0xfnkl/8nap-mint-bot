@@ -858,8 +858,6 @@ async function pollOnce() {
   );
 
   continue;
-}
-
 } else if (parsed.name === "Transfer") {
   const from = parsed.args.from;
   const to = parsed.args.to;
