@@ -25,6 +25,12 @@
       "artist": "DeltaSauce",
       "standard": "erc721",
       "contractAddress": "0xbe27770b0263133B9D3A1D4c7C2760007B94e37f"
+    },
+    {
+      "name": "What Cities Hold",
+      "artist": "Sigma-X",
+      "standard": "erc721",
+      "contractAddress": "0xE0b3DF70993aa148Ea47f3F028bF76c88ACb2671"
     }
   ]
 }
