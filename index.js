@@ -936,15 +936,8 @@ if (!isAuction) {
     } catch {}
   }
 
-  // Use highest known bid for the resolved tokenId, fallback to tx.value (usually 0)
+  // Use highest known bid for the resolved tokenId. Do NOT fall back to tx.value.
   let amountWeiStr = freshState.lastBidWeiByToken?.[resolvedTokenIdStr] || null;
-
-  if (!amountWeiStr) {
-    try {
-      const tx = await provider.getTransaction(log.transactionHash);
-      if (tx?.value != null) amountWeiStr = tx.value.toString();
-    } catch {}
-  }
   if (!amountWeiStr) amountWeiStr = "0";
 
   // Store pending auction by resolved tokenId
