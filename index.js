@@ -772,6 +772,54 @@ async function pollOnce() {
       // Do not advance cursor on failure
       continue;
     }
+    // --------- Per-tx mint unit counting (for correct per-token pricing) ---------
+// For non-auction collections, tx.value is the TOTAL paid for the whole transaction.
+// If multiple tokens/units mint in one tx, we must divide by the number minted.
+const mintUnitsByTx = {}; // txHash -> BigInt(total units minted in this tx for this contract)
+const txValueCache = {};  // txHash -> tx.value BigInt
+
+if (!isAuction) {
+  for (const lg of logs) {
+    let p;
+    try {
+      p = iface.parseLog(lg);
+    } catch {
+      continue;
+    }
+
+    // ERC721 mint-only: Transfer(from=ZERO) => 1 unit per log
+    if (standard === "erc721" && p.name === "Transfer") {
+      const from = p.args.from;
+      if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+        const h = lg.transactionHash;
+        mintUnitsByTx[h] = (mintUnitsByTx[h] || 0n) + 1n;
+      }
+    }
+
+    // ERC1155 mint-only: quantities come from value(s)
+    if (standard === "erc1155") {
+      const h = lg.transactionHash;
+
+      if (p.name === "TransferSingle") {
+        const from = p.args.from;
+        const value = p.args.value;
+        if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+          mintUnitsByTx[h] = (mintUnitsByTx[h] || 0n) + BigInt(value.toString());
+        }
+      }
+
+      if (p.name === "TransferBatch") {
+        const from = p.args.from;
+        const values = p.args.values;
+        if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+          let sum = 0n;
+          for (const v of values) sum += BigInt(v.toString());
+          mintUnitsByTx[h] = (mintUnitsByTx[h] || 0n) + sum;
+        }
+      }
+    }
+  }
+}
 
     // Process logs in chain order
     for (const log of logs) {
@@ -953,15 +1001,45 @@ async function pollOnce() {
         }
 
         // ===== ERC721 mint-only =====
-        if (standard === "erc721" && !isAuction) {
-          if (parsed.name !== "Transfer") continue;
-          const from = parsed.args.from;
-          const to = parsed.args.to;
-          const tokenId = parsed.args.tokenId;
-          if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+if (standard === "erc721" && !isAuction) {
+  if (parsed.name !== "Transfer") continue;
+  const from = parsed.args.from;
+  const to = parsed.args.to;
+  const tokenId = parsed.args.tokenId;
+  if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-          await postMint(collection, "erc721", contract, tokenId, to, log.transactionHash, log.blockNumber, log.index, 1);
-        }
+  // Per-token price fix: divide tx.value by number of minted tokens in this tx
+  let overridePriceWei = null;
+  try {
+    const h = log.transactionHash;
+    const units = mintUnitsByTx[h] || 1n;
+
+    let txv = txValueCache[h];
+    if (txv == null) {
+      const tx = await provider.getTransaction(h);
+      if (tx?.value != null) txv = BigInt(tx.value.toString());
+      txValueCache[h] = txv;
+    }
+
+    if (txv != null && units > 0n) {
+      overridePriceWei = txv / units;
+    }
+  } catch {}
+
+  await postMint(
+    collection,
+    "erc721",
+    contract,
+    tokenId,
+    to,
+    log.transactionHash,
+    log.blockNumber,
+    log.index,
+    1,
+    overridePriceWei
+  );
+}
+
 
         // ===== ERC1155 mint-only =====
         if (standard === "erc1155") {
@@ -972,7 +1050,37 @@ async function pollOnce() {
             const value = parsed.args.value;
             if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-            await postMint(collection, "erc1155", contract, id, to, log.transactionHash, log.blockNumber, log.index, value);
+            // Per-unit price fix: divide tx.value by total minted units in this tx
+let overridePriceWei = null;
+try {
+  const h = log.transactionHash;
+  const units = mintUnitsByTx[h] || 1n;
+
+  let txv = txValueCache[h];
+  if (txv == null) {
+    const tx = await provider.getTransaction(h);
+    if (tx?.value != null) txv = BigInt(tx.value.toString());
+    txValueCache[h] = txv;
+  }
+
+  if (txv != null && units > 0n) {
+    overridePriceWei = txv / units;
+  }
+} catch {}
+
+await postMint(
+  collection,
+  "erc1155",
+  contract,
+  id,
+  to,
+  log.transactionHash,
+  log.blockNumber,
+  log.index,
+  value,
+  overridePriceWei
+);
+
           } else if (parsed.name === "TransferBatch") {
             const from = parsed.args.from;
             const to = parsed.args.to;
@@ -981,7 +1089,37 @@ async function pollOnce() {
             if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
             for (let i = 0; i < ids.length; i++) {
-              await postMint(collection, "erc1155", contract, ids[i], to, log.transactionHash, log.blockNumber, log.index, values[i]);
+              // Per-unit price fix: divide tx.value by total minted units in this tx
+let overridePriceWei = null;
+try {
+  const h = log.transactionHash;
+  const units = mintUnitsByTx[h] || 1n;
+
+  let txv = txValueCache[h];
+  if (txv == null) {
+    const tx = await provider.getTransaction(h);
+    if (tx?.value != null) txv = BigInt(tx.value.toString());
+    txValueCache[h] = txv;
+  }
+
+  if (txv != null && units > 0n) {
+    overridePriceWei = txv / units;
+  }
+} catch {}
+
+await postMint(
+  collection,
+  "erc1155",
+  contract,
+  ids[i],
+  to,
+  log.transactionHash,
+  log.blockNumber,
+  log.index,
+  values[i],
+  overridePriceWei
+);
+
             }
           }
         }
