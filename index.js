@@ -848,7 +848,7 @@ if (!isAuction) {
             tokenIdNow = await contract.totalSupply({ blockTag: log.blockNumber });
           } catch {}
 
-          const tokenIdStr = tokenIdNow != null ? tokenIdNow.toString() : "unknown";
+          const tokenIdStr = tokenIdNow != null ? tokenIdFromTotalSupply(tokenIdNow) : "unknown";
 
           // track the current auction piece deterministically
           freshState.currentAuctionTokenId = tokenIdStr !== "unknown" ? tokenIdStr : freshState.currentAuctionTokenId;
@@ -932,7 +932,7 @@ if (!isAuction) {
   if (!resolvedTokenIdStr || resolvedTokenIdStr === "0") {
     try {
       const supplyNow = await contract.totalSupply({ blockTag: log.blockNumber });
-      if (supplyNow != null) resolvedTokenIdStr = supplyNow.toString();
+      if (supplyNow != null) resolvedTokenIdStr = tokenIdFromTotalSupply(supplyNow);
     } catch {}
   }
 
