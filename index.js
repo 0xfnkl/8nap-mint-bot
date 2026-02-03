@@ -839,23 +839,25 @@ if (!isAuction) {
 
       try {
         // ===== Auction (Issues/Metamorphosis) =====
-        if (standard === "erc721" && isAuction) {
-          if (parsed.name === "PieceRevealed") {
-            const freshState = loadState(addr);
+        if (parsed.name === "PieceRevealed") {
+  const freshState = loadState(addr);
 
-          let tokenIdNow = null;
-          try {
-            tokenIdNow = await contract.totalSupply({ blockTag: log.blockNumber });
-          } catch {}
+  let supplyNow = null;
+  try {
+    supplyNow = await contract.totalSupply({ blockTag: log.blockNumber });
+  } catch {}
 
-          const tokenIdStr = tokenIdNow != null ? tokenIdNow.toString() : "unknown";
+  // FIX: always derive tokenId from totalSupply
+  const tokenIdStr = supplyNow != null ? tokenIdFromTotalSupply(supplyNow) : "unknown";
 
-          // track the current auction piece deterministically
-          freshState.currentAuctionTokenId = tokenIdStr !== "unknown" ? tokenIdStr : freshState.currentAuctionTokenId;
-          saveState(addr, freshState);
+  if (tokenIdStr !== "unknown") {
+    freshState.currentAuctionTokenId = tokenIdStr;
+  }
+  saveState(addr, freshState);
 
-          await postPieceRevealed(collection, tokenIdStr, log.transactionHash, log.blockNumber);
-      } else if (parsed.name === "NewBidPlaced") {
+  await postPieceRevealed(collection, tokenIdStr, log.transactionHash, log.blockNumber);
+}
+      else if (parsed.name === "NewBidPlaced") {
   const bidStruct = parsed.args.bid;
   const bidder = bidStruct.bidder;
   const amount = bidStruct.amount;
@@ -932,7 +934,7 @@ if (!isAuction) {
   if (!resolvedTokenIdStr || resolvedTokenIdStr === "0") {
     try {
       const supplyNow = await contract.totalSupply({ blockTag: log.blockNumber });
-      if (supplyNow != null) resolvedTokenIdStr = supplyNow.toString();
+if (supplyNow != null) resolvedTokenIdStr = tokenIdFromTotalSupply(supplyNow);
     } catch {}
   }
 
