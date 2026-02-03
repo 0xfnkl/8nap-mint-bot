@@ -1233,8 +1233,7 @@ async function runMonthlyLedgerPosterTick() {
   }
 }
 
-client.once("clientReady", async () => {
-  console.log("[discord] ready handler fired");
+client.once("ready", async () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
   try {
     // 3C.2: register slash commands on boot
