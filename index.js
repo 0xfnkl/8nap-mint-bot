@@ -1264,4 +1264,3 @@ client.once("clientReady", async () => {
 });
 
 client.login(process.env.DISCORD_BOT_TOKEN);
-console.log("[boot] login called");
