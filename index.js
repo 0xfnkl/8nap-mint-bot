@@ -43,6 +43,34 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 const STATE_DIR = path.join(DATA_DIR, "state");
 if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR);
 
+// Persisted ETH/USD cache (for Discord display only, not used in the ledger)
+const ETH_PRICE_CACHE_PATH = path.join(STATE_DIR, "eth_price_usd.json");
+
+function loadEthPriceCacheFromDisk() {
+  try {
+    if (!fs.existsSync(ETH_PRICE_CACHE_PATH)) return null;
+    const parsed = JSON.parse(fs.readFileSync(ETH_PRICE_CACHE_PATH, "utf8"));
+    const usd = Number(parsed?.usd);
+    const ts = Number(parsed?.ts);
+    if (!Number.isFinite(usd) || usd <= 0) return null;
+    return { usd, ts: Number.isFinite(ts) ? ts : 0 };
+  } catch {
+    return null;
+  }
+}
+
+function saveEthPriceCacheToDisk(usd) {
+  try {
+    fs.writeFileSync(
+      ETH_PRICE_CACHE_PATH,
+      JSON.stringify({ usd: Number(usd), ts: Date.now() }, null, 2)
+    );
+  } catch {
+    // ignore disk write errors
+  }
+}
+
+
 function stateFileFor(address) {
   return path.join(STATE_DIR, `${address.toLowerCase()}.json`);
 }
@@ -399,27 +427,50 @@ async function formatDisplayAddress(address) {
   return display;
 }
 
-// ETH price cache (optional)
-let cachedEthPrice = null;
-let cacheTime = 0;
+// ETH price cache (Discord display only)
+let cachedEthPrice = null; // number
+let cacheTime = 0;         // ms since epoch for in-memory cache freshness
+
+async function fetchEthPriceUsdFromCoinGecko() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+  const res = await fetch(
+    "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
+    { signal: controller.signal }
+  );
+
+  clearTimeout(timeoutId);
+
+  if (!res.ok) throw new Error(`coingecko http ${res.status}`);
+  const data = await res.json();
+  const usd = Number(data?.ethereum?.usd);
+  if (!Number.isFinite(usd) || usd <= 0) throw new Error("coingecko bad usd");
+  return usd;
+}
 
 async function getEthPriceUsd() {
-  if (Date.now() - cacheTime < 60000 && cachedEthPrice) return cachedEthPrice;
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-    const res = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
-      { signal: controller.signal }
-    );
-
-    clearTimeout(timeoutId);
-    const data = await res.json();
-    cachedEthPrice = data?.ethereum?.usd ?? null;
-    cacheTime = Date.now();
+  // 1) In-memory cache (fresh for 10 minutes)
+  if (cachedEthPrice && (Date.now() - cacheTime) < 10 * 60 * 1000) {
     return cachedEthPrice;
-  } catch {
+  }
+
+  // 2) Disk cache fallback (survives restarts)
+  const disk = loadEthPriceCacheFromDisk();
+  if (disk?.usd) {
+    cachedEthPrice = disk.usd;
+    cacheTime = disk.ts || Date.now(); // treat disk timestamp as cache time
+  }
+
+  // 3) Try refreshing from CoinGecko (but never fail the mint post)
+  try {
+    const usd = await fetchEthPriceUsdFromCoinGecko();
+    cachedEthPrice = usd;
+    cacheTime = Date.now();
+    saveEthPriceCacheToDisk(usd);
+    return usd;
+  } catch (e) {
+    // If API fails, return whatever we have (memory or disk). Could be null on first-ever run.
     return cachedEthPrice;
   }
 }
@@ -1201,6 +1252,13 @@ setInterval(async () => {
     console.log(`💓 Heartbeat error: ${e.message}`);
   }
 }, 300000);
+
+// Warm ETH/USD cache in the background (free, low frequency)
+setInterval(async () => {
+  try {
+    await getEthPriceUsd(); // uses caching + disk; only hits CoinGecko occasionally
+  } catch {}
+}, 15 * 60 * 1000);
 
 // Graceful shutdown
 async function shutdown(signal) {
