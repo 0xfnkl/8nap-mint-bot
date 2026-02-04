@@ -1001,53 +1001,11 @@ if (standard === "erc721" && !isAuction) {
   const tokenId = parsed.args.tokenId;
   if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-  // Per-token price fix: divide tx.value by number of minted tokens in this tx
-  let overridePriceWei = null;
-  try {
-    const h = log.transactionHash;
-    const units = mintUnitsByTx[h] || 1n;
-
-    let txv = txValueCache[h];
-    if (txv == null) {
-      const tx = await provider.getTransaction(h);
-      if (tx?.value != null) txv = BigInt(tx.value.toString());
-      txValueCache[h] = txv;
-    }
-
-    if (txv != null && units > 0n) {
-      overridePriceWei = txv / units;
-    }
-  } catch {}
-
-  await postMint(
-    collection,
-    "erc721",
-    contract,
-    tokenId,
-    to,
-    log.transactionHash,
-    log.blockNumber,
-    log.index,
-    1,
-    overridePriceWei
-  );
-}
-
-
-        // ===== ERC1155 mint-only =====
-        if (standard === "erc1155") {
-          if (parsed.name === "TransferSingle") {
-            const from = parsed.args.from;
-            const to = parsed.args.to;
-            const id = parsed.args.id;
-            const value = parsed.args.value;
-            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
-
-            // Per-unit price fix: divide tx.value by total minted units in this tx
+  // ERC1155 display + ledger: show TOTAL spent for this mint row (per-unit * quantity)
 let overridePriceWei = null;
 try {
   const h = log.transactionHash;
-  const units = mintUnitsByTx[h] || 1n;
+  const units = mintUnitsByTx[h] || 1n; // total units minted in this tx for this contract
 
   let txv = txValueCache[h];
   if (txv == null) {
@@ -1057,7 +1015,9 @@ try {
   }
 
   if (txv != null && units > 0n) {
-    overridePriceWei = txv / units;
+    const perUnitWei = txv / units;              // price per unit (approx, integer division)
+    const qtyWei = BigInt(value.toString());     // quantity for THIS TransferSingle
+    overridePriceWei = perUnitWei * qtyWei;      // total spent for THIS row
   }
 } catch {}
 
@@ -1071,6 +1031,51 @@ await postMint(
   log.blockNumber,
   log.index,
   value,
+  overridePriceWei
+);
+
+}
+
+
+        // ===== ERC1155 mint-only =====
+        if (standard === "erc1155") {
+          if (parsed.name === "TransferSingle") {
+            const from = parsed.args.from;
+            const to = parsed.args.to;
+            const id = parsed.args.id;
+            const value = parsed.args.value;
+            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+
+            // ERC1155 batch: show TOTAL spent for this row (per-unit * this id's quantity)
+let overridePriceWei = null;
+try {
+  const h = log.transactionHash;
+  const units = mintUnitsByTx[h] || 1n;
+
+  let txv = txValueCache[h];
+  if (txv == null) {
+    const tx = await provider.getTransaction(h);
+    if (tx?.value != null) txv = BigInt(tx.value.toString());
+    txValueCache[h] = txv;
+  }
+
+  if (txv != null && units > 0n) {
+    const perUnitWei = txv / units;
+    const qtyWei = BigInt(values[i].toString()); // quantity for THIS id in the batch
+    overridePriceWei = perUnitWei * qtyWei;
+  }
+} catch {}
+
+await postMint(
+  collection,
+  "erc1155",
+  contract,
+  ids[i],
+  to,
+  log.transactionHash,
+  log.blockNumber,
+  log.index,
+  values[i],
   overridePriceWei
 );
 
