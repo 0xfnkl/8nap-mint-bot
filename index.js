@@ -1089,89 +1089,92 @@ await postMint(
 
 
         // ===== ERC1155 mint-only =====
-        if (standard === "erc1155") {
-          if (parsed.name === "TransferSingle") {
-            const from = parsed.args.from;
-            const to = parsed.args.to;
-            const id = parsed.args.id;
-            const value = parsed.args.value;
-            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+if (standard === "erc1155") {
+  if (parsed.name === "TransferSingle") {
+    const from = parsed.args.from;
+    const to = parsed.args.to;
+    const id = parsed.args.id;
+    const value = parsed.args.value;
 
-            // ERC1155 batch: show TOTAL spent for this row (per-unit * this id's quantity)
-let overridePriceWei = null;
-try {
-  const h = log.transactionHash;
-  const units = mintUnitsByTx[h] || 1n;
+    if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-  let txv = txValueCache[h];
-  if (txv == null) {
-    const tx = await provider.getTransaction(h);
-    if (tx?.value != null) txv = BigInt(tx.value.toString());
-    txValueCache[h] = txv;
-  }
+    // ERC1155: show TOTAL spent for this row (per-unit * quantity in this event)
+    let overridePriceWei = null;
+    try {
+      const h = log.transactionHash;
+      const units = mintUnitsByTx[h] || 1n; // total units minted in this tx (this contract)
 
-  if (txv != null && units > 0n) {
-    const perUnitWei = txv / units;
-    const qtyWei = BigInt(values[i].toString()); // quantity for THIS id in the batch
-    overridePriceWei = perUnitWei * qtyWei;
-  }
-} catch {}
+      let txv = txValueCache[h];
+      if (txv == null) {
+        const tx = await provider.getTransaction(h);
+        if (tx?.value != null) txv = BigInt(tx.value.toString());
+        txValueCache[h] = txv;
+      }
 
-await postMint(
-  collection,
-  "erc1155",
-  contract,
-  ids[i],
-  to,
-  log.transactionHash,
-  log.blockNumber,
-  log.index,
-  values[i],
-  overridePriceWei
-);
+      if (txv != null && units > 0n) {
+        const perUnitWei = txv / units;
+        const qty = BigInt(value.toString());
+        overridePriceWei = perUnitWei * qty;
+      }
+    } catch {}
 
-          } else if (parsed.name === "TransferBatch") {
-            const from = parsed.args.from;
-            const to = parsed.args.to;
-            const ids = parsed.args.ids;
-            const values = parsed.args.values;
-            if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+    await postMint(
+      collection,
+      "erc1155",
+      contract,
+      id,
+      to,
+      log.transactionHash,
+      log.blockNumber,
+      log.index,
+      value,
+      overridePriceWei
+    );
+  } else if (parsed.name === "TransferBatch") {
+    const from = parsed.args.from;
+    const to = parsed.args.to;
+    const ids = parsed.args.ids;
+    const values = parsed.args.values;
 
-            for (let i = 0; i < ids.length; i++) {
-              // Per-unit price fix: divide tx.value by total minted units in this tx
-let overridePriceWei = null;
-try {
-  const h = log.transactionHash;
-  const units = mintUnitsByTx[h] || 1n;
+    if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-  let txv = txValueCache[h];
-  if (txv == null) {
-    const tx = await provider.getTransaction(h);
-    if (tx?.value != null) txv = BigInt(tx.value.toString());
-    txValueCache[h] = txv;
-  }
+    for (let i = 0; i < ids.length; i++) {
+      // ERC1155: show TOTAL spent for this row (per-unit * quantity for this id)
+      let overridePriceWei = null;
+      try {
+        const h = log.transactionHash;
+        const units = mintUnitsByTx[h] || 1n;
 
-  if (txv != null && units > 0n) {
-    overridePriceWei = txv / units;
-  }
-} catch {}
-
-await postMint(
-  collection,
-  "erc1155",
-  contract,
-  ids[i],
-  to,
-  log.transactionHash,
-  log.blockNumber,
-  log.index,
-  values[i],
-  overridePriceWei
-);
-
-            }
-          }
+        let txv = txValueCache[h];
+        if (txv == null) {
+          const tx = await provider.getTransaction(h);
+          if (tx?.value != null) txv = BigInt(tx.value.toString());
+          txValueCache[h] = txv;
         }
+
+        if (txv != null && units > 0n) {
+          const perUnitWei = txv / units;
+          const qty = BigInt(values[i].toString());
+          overridePriceWei = perUnitWei * qty;
+        }
+      } catch {}
+
+      await postMint(
+        collection,
+        "erc1155",
+        contract,
+        ids[i],
+        to,
+        log.transactionHash,
+        log.blockNumber,
+        log.index,
+        values[i],
+        overridePriceWei
+      );
+    }
+  }
+}
+
       } catch (e) {
   console.error(`❌ Error handling ${collection.name} ${parsed.name}:`, e.message);
   console.error(e); // <-- this prints stack + more details
