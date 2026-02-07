@@ -747,10 +747,17 @@ async function initializeStateToHeadIfEmpty(collection) {
   }
 }
 
-function tokenIdFromTotalSupply(totalSupplyValue) {
-  // Many ERC721s use 0-based tokenIds, so tokenId is usually totalSupply - 1
+function tokenIdFromTotalSupply(totalSupplyValue, collectionName) {
   try {
     const n = BigInt(totalSupplyValue.toString());
+
+    // 8NAP auction collections display piece numbers as 1-based (e.g., Minted 490 => Piece #490)
+    // So tokenId should equal totalSupply, not totalSupply-1.
+    const oneBased = (collectionName === "Issues" || collectionName === "Metamorphosis");
+
+    if (oneBased) return n.toString();
+
+    // Default behavior (0-based)
     return (n > 0n ? n - 1n : 0n).toString();
   } catch {
     return "unknown";
@@ -899,7 +906,7 @@ if (!isAuction) {
             tokenIdNow = await contract.totalSupply({ blockTag: log.blockNumber });
           } catch {}
 
-          const tokenIdStr = tokenIdNow != null ? tokenIdFromTotalSupply(tokenIdNow) : "unknown";
+          const tokenIdStr = tokenIdNow != null ? tokenIdFromTotalSupply(tokenIdNow, collection.name) : "unknown";
 
           // track the current auction piece deterministically
           freshState.currentAuctionTokenId = tokenIdStr !== "unknown" ? tokenIdStr : freshState.currentAuctionTokenId;
@@ -920,7 +927,7 @@ if (!isAuction) {
   let tokenIdStr = freshState.currentAuctionTokenId || "unknown";
   try {
     const t = await contract.totalSupply({ blockTag: log.blockNumber });
-    const fromSupply = tokenIdFromTotalSupply(t);
+    const fromSupply = tokenIdFromTotalSupply(t, collection.name);
     if (fromSupply) tokenIdStr = fromSupply;
   } catch {}
 
@@ -983,7 +990,7 @@ if (!isAuction) {
   if (!resolvedTokenIdStr || resolvedTokenIdStr === "0") {
     try {
       const supplyNow = await contract.totalSupply({ blockTag: log.blockNumber });
-      if (supplyNow != null) resolvedTokenIdStr = tokenIdFromTotalSupply(supplyNow);
+      if (supplyNow != null) resolvedTokenIdStr = tokenIdFromTotalSupply(supplyNow, collection.name);
     } catch {}
   }
 
