@@ -912,38 +912,31 @@ if (!isAuction) {
       } else if (parsed.name === "NewBidPlaced") {
   const bidStruct = parsed.args.bid;
   const bidder = bidStruct.bidder;
-  const amount = bidStruct.amount;
+  const amount = bidStruct.amount; // bigint
 
   const freshState = loadState(addr);
 
-  // Determine tokenId for this bid.
-  // Key idea:
-  // - totalSupply at this block is the best guess for "current auction token"
-  // - this avoids ordering issues when bid + reveal happen close together
-  let tokenIdStr = freshState.currentAuctionTokenId || "unknown";
-  try {
-    const t = await contract.totalSupply({ blockTag: log.blockNumber });
-    const fromSupply = tokenIdFromTotalSupply(t, collection.tokenIdBase ?? 0);
-    if (fromSupply) tokenIdStr = fromSupply;
-  } catch {}
+  // Best source: last revealed piece for the auction
+  let tokenIdStr = freshState.currentAuctionTokenId;
 
-  // Keep current token aligned if we learned something better
-  if (tokenIdStr !== "unknown") {
-    freshState.currentAuctionTokenId = tokenIdStr;
+  // Fallback: infer from totalSupply at this block
+  if (!tokenIdStr || tokenIdStr === "unknown") {
+    try {
+      const t = await contract.totalSupply({ blockTag: log.blockNumber });
+      tokenIdStr = tokenIdFromTotalSupply(t);
+      freshState.currentAuctionTokenId = tokenIdStr;
+    } catch {
+      tokenIdStr = "unknown";
+    }
   }
 
-  // First-bid detection MUST be persistent, not in-memory.
-  // First bid is exactly 0.1 ETH AND we have no previous bid stored for this token.
   const prevBidWeiStr =
-    tokenIdStr !== "unknown" ? (freshState.lastBidWeiByToken?.[tokenIdStr] ?? null) : null;
+    tokenIdStr !== "unknown" ? (freshState.lastBidWeiByToken[tokenIdStr] ?? null) : null;
 
   const FIRST_BID_WEI = ethers.parseEther("0.1");
   const isFirstBid =
-    tokenIdStr !== "unknown" &&
-    prevBidWeiStr == null &&
-    BigInt(amount.toString()) === FIRST_BID_WEI;
+    tokenIdStr !== "unknown" && amount === FIRST_BID_WEI && !prevBidWeiStr;
 
-  // Persist latest/highest bid for this token (used later for Auction Ended + ledger price)
   if (tokenIdStr !== "unknown") {
     freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
     saveState(addr, freshState);
@@ -968,68 +961,57 @@ if (!isAuction) {
 
   const freshState = loadState(addr);
 
-  // === Auction settlement placeholder (NOT the real mint) ===
-  // This is the transfer from ZERO_ADDRESS in the auction contract behavior
+  // (A) Settlement marker: mint/airdrop from ZERO -> winner.
+  // The tokenId/art in this tx can be wrong, so we key off the last revealed auction token instead.
   if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+    const resolvedTokenIdStr =
+      (freshState.currentAuctionTokenId && freshState.currentAuctionTokenId !== "unknown")
+        ? freshState.currentAuctionTokenId
+        : tokenIdStr;
 
-  // The auction house "settlement placeholder" Transfer often has a useless tokenId (commonly 0).
-  // We must resolve the real auction tokenId from our persisted state.
-  const seenTokenIdStr = tokenIdStr;
-  let resolvedTokenIdStr = seenTokenIdStr;
+    // amount: prefer last bid we observed for that token, fallback to tx.value (often 0)
+    let amountWeiStr = freshState.lastBidWeiByToken[resolvedTokenIdStr] || null;
+    if (!amountWeiStr) {
+      try {
+        const tx = await provider.getTransaction(log.transactionHash);
+        if (tx?.value != null) amountWeiStr = tx.value.toString();
+      } catch {}
+    }
+    if (!amountWeiStr) amountWeiStr = "0";
 
-  // If this tokenId doesn't map to a known bid, prefer currentAuctionTokenId from state.
-  if (resolvedTokenIdStr === "0" || !freshState.lastBidWeiByToken?.[resolvedTokenIdStr]) {
-    if (freshState.currentAuctionTokenId) resolvedTokenIdStr = freshState.currentAuctionTokenId;
+    // store pending by the REAL auction token id
+    freshState.pendingAuctions[resolvedTokenIdStr] = {
+      winner: to,
+      settlementTx: log.transactionHash,
+      amountWei: amountWeiStr,
+    };
+
+    // keep aligned
+    freshState.currentAuctionTokenId = resolvedTokenIdStr;
+    saveState(addr, freshState);
+
+    // Post Auction Ended using the REAL token id
+    await postAuctionEnded(
+      collection,
+      resolvedTokenIdStr,
+      to,
+      BigInt(amountWeiStr),
+      log.transactionHash,
+      log.blockNumber
+    );
+
+    continue;
   }
 
-  // Final fallback: infer something at this block height (best-effort)
-  if (!resolvedTokenIdStr || resolvedTokenIdStr === "0") {
-    try {
-      const supplyNow = await contract.totalSupply({ blockTag: log.blockNumber });
-      if (supplyNow != null) resolvedTokenIdStr = tokenIdFromTotalSupply(supplyNow, collection.tokenIdBase ?? 0);
-    } catch {}
-  }
-
-  // Use highest known bid for the resolved tokenId. Do NOT fall back to tx.value.
-  let amountWeiStr = freshState.lastBidWeiByToken?.[resolvedTokenIdStr] || null;
-  if (!amountWeiStr) amountWeiStr = "0";
-
-  // Store pending auction by resolved tokenId
-  freshState.pendingAuctions[resolvedTokenIdStr] = {
-    winner: to,
-    settlementTx: log.transactionHash,
-    amountWei: amountWeiStr,
-  };
-
-  // keep currentAuctionTokenId aligned to resolved id
-  freshState.currentAuctionTokenId = resolvedTokenIdStr;
-  saveState(addr, freshState);
-
-  // Post "Auction Ended" using resolved tokenId + final bid
-  await postAuctionEnded(
-    collection,
-    resolvedTokenIdStr,
-    to,
-    BigInt(amountWeiStr),
-    log.transactionHash,
-    log.blockNumber
-  );
-
-  continue;
-}
-
-  // === Claim transfer (REAL mint) ===
-  // This is the transfer that happens when winner claims and token actually becomes theirs.
-  const pending = freshState.pendingAuctions?.[tokenIdStr];
+  // (B) Claim/self-transfer: after settlement, winner triggers a transfer that makes the token "real".
+  const pending = freshState.pendingAuctions[tokenIdStr];
   if (pending) {
-    const mintContract = new ethers.Contract(addr, ERC721_ABI, provider);
-
-    const overridePriceWei = pending.amountWei ? BigInt(pending.amountWei) : null;
+    const overridePriceWei = BigInt(pending.amountWei || "0");
 
     await postMint(
       collection,
       "erc721",
-      mintContract,
+      contract,
       tokenId,
       to,
       log.transactionHash,
@@ -1039,7 +1021,6 @@ if (!isAuction) {
       overridePriceWei
     );
 
-    // clear pending for this tokenId only
     delete freshState.pendingAuctions[tokenIdStr];
     saveState(addr, freshState);
   }
