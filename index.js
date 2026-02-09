@@ -1036,11 +1036,11 @@ if (standard === "erc721" && !isAuction) {
   const tokenId = parsed.args.tokenId;
   if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
 
-  // ERC1155 display + ledger: show TOTAL spent for this mint row (per-unit * quantity)
+ // ERC721: show per-token price (if multiple ERC721 mints in same tx, split tx.value across tokens)
 let overridePriceWei = null;
 try {
   const h = log.transactionHash;
-  const units = mintUnitsByTx[h] || 1n; // total units minted in this tx for this contract
+  const units = mintUnitsByTx[h] || 1n;
 
   let txv = txValueCache[h];
   if (txv == null) {
@@ -1050,11 +1050,22 @@ try {
   }
 
   if (txv != null && units > 0n) {
-    const perUnitWei = txv / units;              // price per unit (approx, integer division)
-    const qtyWei = BigInt(value.toString());     // quantity for THIS TransferSingle
-    overridePriceWei = perUnitWei * qtyWei;      // total spent for THIS row
+    overridePriceWei = txv / units; // per token
   }
 } catch {}
+
+await postMint(
+  collection,
+  "erc721",
+  contract,
+  tokenId,
+  to,
+  log.transactionHash,
+  log.blockNumber,
+  log.index,
+  1,
+  overridePriceWei
+);
 
 await postMint(
   collection,
