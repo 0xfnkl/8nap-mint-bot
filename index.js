@@ -2,43 +2,6 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-
-/**
- * TEMP DEBUG: Log Railway volume contents
- * Remove after confirming files exist.
- */
-function logDataVolume() {
-  try {
-    console.log("=== /data volume check ===");
-
-    if (!fs.existsSync("/data")) {
-      console.log("❌ /data does not exist (volume not mounted)");
-      return;
-    }
-
-    console.log("✅ /data exists");
-    console.log("Contents of /data:", fs.readdirSync("/data"));
-
-    if (fs.existsSync("/data/state")) {
-      console.log("Contents of /data/state:", fs.readdirSync("/data/state"));
-    } else {
-      console.log("No /data/state directory");
-    }
-
-    if (fs.existsSync("/data/ledger")) {
-      console.log("Contents of /data/ledger:", fs.readdirSync("/data/ledger"));
-    } else {
-      console.log("No /data/ledger directory");
-    }
-
-    console.log("=== end volume check ===");
-  } catch (err) {
-    console.log("Error reading /data:", err);
-  }
-}
-
-logDataVolume();
-
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, REST, Routes, SlashCommandBuilder } = require("discord.js");
 const { ethers } = require("ethers");
 
