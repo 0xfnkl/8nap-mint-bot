@@ -489,14 +489,17 @@ function auctionViewLink(collectionName) {
     : "https://8nap.art/collection/metamorphosis";
 }
 
-function s3Preview(collectionName, tokenIdStr) {
-  if (collectionName === "Issues") {
-    return `https://8nap.s3.eu-central-1.amazonaws.com/previews/74/small/${tokenIdStr}`;
+function s3Preview(collection, tokenIdStr) {
+  let s3Id = null;
+
+  if (typeof collection?.previewS3Id === "number") {
+    s3Id = collection.previewS3Id;
+  } else if (collection?.preview?.enabled === true && typeof collection?.preview?.s3Id === "number") {
+    s3Id = collection.preview.s3Id;
   }
-  if (collectionName === "Metamorphosis") {
-    return `https://8nap.s3.eu-central-1.amazonaws.com/previews/107/small/${tokenIdStr}`;
-  }
-  return null;
+
+  if (s3Id == null) return null;
+  return `https://8nap.s3.eu-central-1.amazonaws.com/previews/${s3Id}/small/${tokenIdStr}`;
 }
 async function previewExists(url) {
   try {
@@ -512,7 +515,7 @@ async function postAuctionEnded(collection, tokenIdStr, winner, amountWei, txHas
 
   let imageUrl = null;
 if (tokenIdStr !== "unknown") {
-  const previewUrl = s3Preview(collection.name, tokenIdStr);
+  const previewUrl = s3Preview(collection, tokenIdStr);
   if (previewUrl && await previewExists(previewUrl)) {
     imageUrl = previewUrl;
   }
@@ -562,7 +565,7 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
   let title = `${collection.name} #${tokenIdStr}`;
 
   if (collection.isAuction === true) {
-    imageUrl = s3Preview(collection.name, tokenIdStr);
+    imageUrl = s3Preview(collection, tokenIdStr);
   } else {
     const metadata = await retryAsync(() => loadMetadata(standard, contract, tokenId));
     title = metadata?.name || title;
@@ -657,7 +660,7 @@ try {
 
 async function postPieceRevealed(collection, tokenIdStr, txHash, blockNumber) {
 
-  const imageUrl = tokenIdStr !== "unknown" ? s3Preview(collection.name, tokenIdStr) : null;
+  const imageUrl = tokenIdStr !== "unknown" ? s3Preview(collection, tokenIdStr) : null;
 
   let timestampMs = Date.now();
   try {
@@ -692,7 +695,7 @@ async function postBid(collection, tokenIdStr, bidder, amountWei, isFirstBid, tx
 
 let imageUrl = null;
 if (tokenIdStr !== "unknown") {
-  const previewUrl = s3Preview(collection.name, tokenIdStr);
+  const previewUrl = s3Preview(collection, tokenIdStr);
   if (previewUrl) {
     try {
       if (await previewExists(previewUrl)) imageUrl = previewUrl;
