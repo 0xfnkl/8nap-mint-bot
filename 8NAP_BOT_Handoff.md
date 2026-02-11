@@ -61,10 +61,10 @@ The bot persists state and ledgers here. Key folders/files:
   - `mints-YYYY-MM.csv`
   Monthly CSV ledger files (append-only per month).
 
-- `/data/ledger_post_state.json`
+- `/data/state/ledger_post_state.json`
   Tracks which monthly CSV has already been posted so the bot doesn’t double-post on restarts.
 
-- `/data/eth_price_usd.json`
+- `/data/state/eth_price_usd.json`
   Cached ETH/USD price used ONLY for Discord display. Not written into the ledger.
 
 If the volume is missing or `DATA_DIR` is wrong, the bot may “work” but will not persist correctly across deploys.
@@ -141,7 +141,7 @@ Known edge cases:
 2) `/ledgercsv` says file not found:
    - No mints yet for that month OR ledger directory path mismatch.
 3) USD missing in Discord posts:
-   - ETH/USD cache not yet refreshed; cache is stored in `/data/eth_price_usd.json` and updates on heartbeat.
+   - ETH/USD cache not yet refreshed; cache is stored in `/data/state/eth_price_usd.json` and updates on heartbeat.
 4) Multi-mint tx shows wrong ETH:
    - Ensure tx.value splitting logic is enabled (ERC721 per token; ERC1155 total spent).
 
