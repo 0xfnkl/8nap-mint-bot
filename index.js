@@ -10,7 +10,89 @@ const { ethers } = require("ethers");
 // =========================
 
 const configPath = path.join(__dirname, "config.json");
-const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+let config;
+try {
+  config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+} catch (e) {
+  console.error(`❌ Failed to read/parse config.json: ${e.message}`);
+  process.exit(1);
+}
+
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function validateConfig(cfg) {
+  const errors = [];
+
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+    errors.push("config must be a JSON object.");
+  }
+
+  if (!isNonEmptyString(cfg?.discordChannelId)) {
+    errors.push("discordChannelId is required and must be a non-empty string.");
+  }
+  if (!isNonEmptyString(cfg?.auctionChannelId)) {
+    errors.push("auctionChannelId is required and must be a non-empty string.");
+  }
+
+  if (!Array.isArray(cfg?.collections)) {
+    errors.push("collections is required and must be an array.");
+  } else {
+    cfg.collections.forEach((collection, i) => {
+      const where = `collections[${i}]`;
+
+      if (!collection || typeof collection !== "object" || Array.isArray(collection)) {
+        errors.push(`${where} must be an object.`);
+        return;
+      }
+
+      if (!isNonEmptyString(collection.name)) {
+        errors.push(`${where}.name is required and must be a non-empty string.`);
+      }
+      if (!isNonEmptyString(collection.contractAddress)) {
+        errors.push(`${where}.contractAddress is required and must be a non-empty string.`);
+      }
+      if (!isNonEmptyString(collection.standard)) {
+        errors.push(`${where}.standard is required and must be a non-empty string.`);
+      } else {
+        const s = collection.standard.toLowerCase();
+        if (s !== "erc721" && s !== "erc1155") {
+          errors.push(`${where}.standard must be "erc721" or "erc1155".`);
+        }
+      }
+
+      if (collection.isAuction === true && String(collection.standard || "").toLowerCase() !== "erc721") {
+        errors.push(`${where}.isAuction=true requires standard="erc721".`);
+      }
+
+      if (collection.previewS3Id !== undefined && !Number.isFinite(collection.previewS3Id)) {
+        errors.push(`${where}.previewS3Id must be a number when provided.`);
+      }
+
+      if (collection.preview !== undefined) {
+        if (!collection.preview || typeof collection.preview !== "object" || Array.isArray(collection.preview)) {
+          errors.push(`${where}.preview must be an object when provided.`);
+        } else {
+          if (collection.preview.enabled !== undefined && typeof collection.preview.enabled !== "boolean") {
+            errors.push(`${where}.preview.enabled must be a boolean when provided.`);
+          }
+          if (collection.preview.s3Id !== undefined && !Number.isFinite(collection.preview.s3Id)) {
+            errors.push(`${where}.preview.s3Id must be a number when provided.`);
+          }
+        }
+      }
+    });
+  }
+
+  if (errors.length > 0) {
+    console.error("❌ Invalid config.json:");
+    for (const err of errors) console.error(` - ${err}`);
+    process.exit(1);
+  }
+}
+
+validateConfig(config);
 
 if (!process.env.DISCORD_BOT_TOKEN) {
   console.error("❌ Missing env var: DISCORD_BOT_TOKEN");
