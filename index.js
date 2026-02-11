@@ -880,16 +880,18 @@ if (!isAuction) {
       const k = seenKey(log);
       if (st.processed?.[k]) continue;
 
-      // mark processed BEFORE doing network calls to avoid duplicates on crash loops
-      if (!st.processed) st.processed = {};
-      st.processed[k] = true;
-
       let parsed;
       try {
         parsed = iface.parseLog(log);
       } catch {
+        console.log(`[event] failed, will retry tx=${log.transactionHash}`);
         continue;
       }
+
+      const markProcessed = () => {
+        if (!st.processed) st.processed = {};
+        st.processed[k] = true;
+      };
 
       try {
         // ===== Auction (Issues/Metamorphosis) =====
@@ -952,6 +954,7 @@ if (!isAuction) {
     log.blockNumber
   );
 
+  markProcessed();
   continue;
 } else if (parsed.name === "Transfer") {
   const from = parsed.args.from;
@@ -1000,6 +1003,7 @@ if (!isAuction) {
       log.blockNumber
     );
 
+    markProcessed();
     continue;
   }
 
@@ -1030,11 +1034,17 @@ if (!isAuction) {
 
         // ===== ERC721 mint-only =====
 if (standard === "erc721" && !isAuction) {
-  if (parsed.name !== "Transfer") continue;
+  if (parsed.name !== "Transfer") {
+    markProcessed();
+    continue;
+  }
   const from = parsed.args.from;
   const to = parsed.args.to;
   const tokenId = parsed.args.tokenId;
-  if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+  if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) {
+    markProcessed();
+    continue;
+  }
 
  // ERC721: show per-token price (if multiple ERC721 mints in same tx, split tx.value across tokens)
 let overridePriceWei = null;
@@ -1078,7 +1088,10 @@ if (standard === "erc1155") {
     const id = parsed.args.id;
     const value = parsed.args.value;
 
-    if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+    if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) {
+      markProcessed();
+      continue;
+    }
 
     // ERC1155: show TOTAL spent for this row (per-unit * quantity in this event)
     let overridePriceWei = null;
@@ -1118,7 +1131,10 @@ if (standard === "erc1155") {
     const ids = parsed.args.ids;
     const values = parsed.args.values;
 
-    if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) continue;
+    if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) {
+      markProcessed();
+      continue;
+    }
 
     for (let i = 0; i < ids.length; i++) {
       // ERC1155: show TOTAL spent for this row (per-unit * quantity for this id)
@@ -1157,7 +1173,9 @@ if (standard === "erc1155") {
   }
 }
 
+        markProcessed();
       } catch (e) {
+  console.log(`[event] failed, will retry tx=${log.transactionHash}`);
   console.error(`❌ Error handling ${collection.name} ${parsed.name}:`, e.message);
   console.error(e); // <-- this prints stack + more details
 }
