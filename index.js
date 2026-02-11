@@ -1067,19 +1067,6 @@ await postMint(
   overridePriceWei
 );
 
-await postMint(
-  collection,
-  "erc1155",
-  contract,
-  id,
-  to,
-  log.transactionHash,
-  log.blockNumber,
-  log.index,
-  value,
-  overridePriceWei
-);
-
 }
 
 
