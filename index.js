@@ -1212,6 +1212,7 @@ async function registerCommands() {
 // =========================
 
 let pollTimer = null;
+let pollInFlight = false;
 
 async function startPolling() {
   // initialize cursors to safe head on first boot, to avoid posting historical spam
@@ -1228,9 +1229,17 @@ async function startPolling() {
 });
 
 pollTimer = setInterval(() => {
+  if (pollInFlight) {
+    console.log("[poll] skipped: previous poll still running");
+    return;
+  }
+
+  pollInFlight = true;
   pollOnce().catch((e) => {
     console.error("pollOnce error:", e.message);
     console.error(e);
+  }).finally(() => {
+    pollInFlight = false;
   });
 }, POLL_MS);
 }
