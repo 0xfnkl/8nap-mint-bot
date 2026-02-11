@@ -352,6 +352,60 @@ const rateLimiter = {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName === "status") {
+      await interaction.deferReply({ ephemeral: true });
+
+      let headText = "unknown";
+      try {
+        headText = String(await provider.getBlockNumber());
+      } catch {}
+
+      const rows = [
+        "name | standard | isAuction | lastProcessedBlock",
+        "---- | -------- | --------- | ------------------",
+      ];
+
+      for (const collection of config.collections) {
+        const st = loadState(collection.contractAddress);
+        const name = String(collection.name || "").slice(0, 32);
+        const standard = String(collection.standard || "").toLowerCase();
+        const isAuction = collection.isAuction === true ? "true" : "false";
+        const lastProcessedBlock = Number(st?.lastProcessedBlock || 0);
+        rows.push(`${name} | ${standard} | ${isAuction} | ${lastProcessedBlock}`);
+      }
+
+      let content = [
+        `Head: ${headText}`,
+        `DATA_DIR: ${DATA_DIR}`,
+        `DATA_DIR exists: ${fs.existsSync(DATA_DIR) ? "yes" : "no"}`,
+        "",
+        "```",
+        ...rows,
+        "```",
+      ].join("\n");
+
+      if (content.length > 1900) {
+        const maxRows = Math.max(2, rows.length - 1);
+        let cut = maxRows;
+        while (cut >= 2) {
+          content = [
+            `Head: ${headText}`,
+            `DATA_DIR: ${DATA_DIR}`,
+            `DATA_DIR exists: ${fs.existsSync(DATA_DIR) ? "yes" : "no"}`,
+            "",
+            "```",
+            ...rows.slice(0, cut),
+            `... (${rows.length - cut} more collections)`,
+            "```",
+          ].join("\n");
+          if (content.length <= 1900) break;
+          cut -= 1;
+        }
+      }
+
+      await interaction.editReply({ content });
+      return;
+    }
     if (interaction.commandName !== "ledgercsv") return;
 
     // optional arg: month like "2026-01"
@@ -1310,6 +1364,10 @@ async function registerCommands() {
           .setDescription("Month key in YYYY-MM (example: 2026-01). Defaults to current month.")
           .setRequired(false)
       )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("status")
+      .setDescription("Show bot status and per-collection progress")
       .toJSON(),
   ];
 
