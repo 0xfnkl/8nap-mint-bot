@@ -1291,11 +1291,6 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 const LEDGER_CSV_CHANNEL_ID = process.env.LEDGER_CSV_CHANNEL_ID || "1463682240671387952";
 
 async function runMonthlyLedgerPosterTick() {
-  // Use UTC to avoid DST/timezone stupidity.
-  const now = new Date();
-  const day = now.getUTCDate();
-  if (day !== 1) return;
-
   const prevMonthKey = prevMonthKeyFromMs(Date.now());
   const st = loadLedgerPostState();
 
