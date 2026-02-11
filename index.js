@@ -1185,7 +1185,6 @@ if (standard === "erc1155") {
       st.lastBidWeiByToken = st.lastBidWeiByToken ?? latest.lastBidWeiByToken ?? {};
       st.lastBidderByToken = st.lastBidderByToken ?? latest.lastBidderByToken ?? {};
     }
-    console.log(`[pollOnce] pre-save addr=${addr} keys=${Object.keys(st).join(",")}`);
     saveState(addr, st);
   }
 }
