@@ -18,6 +18,7 @@
       "name": "Metamorphosis",
       "artist": "RedruM",
       "standard": "erc721",
+      "isAuction": true,
       "contractAddress": "0xD27Ca58bc4f70E95a7f193965AE60ffCE0D46A87",
       "tokenIdBase": 1
     },
@@ -25,6 +26,7 @@
       "name": "Issues",
       "artist": "DeltaSauce",
       "standard": "erc721",
+      "isAuction": true,
       "contractAddress": "0xbe27770b0263133B9D3A1D4c7C2760007B94e37f",
       "tokenIdBase": 1
     }

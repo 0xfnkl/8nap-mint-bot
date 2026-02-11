@@ -561,7 +561,7 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
   let imageUrl = null;
   let title = `${collection.name} #${tokenIdStr}`;
 
-  if (collection.name === "Issues" || collection.name === "Metamorphosis") {
+  if (collection.isAuction === true) {
     imageUrl = s3Preview(collection.name, tokenIdStr);
   } else {
     const metadata = await retryAsync(() => loadMetadata(standard, contract, tokenId));
@@ -782,7 +782,7 @@ async function pollOnce() {
     let iface;
     let topics;
 
-    const isAuction = (collection.name === "Issues" || collection.name === "Metamorphosis");
+    const isAuction = collection.isAuction === true;
 
     if (standard === "erc721" && isAuction) {
       contract = new ethers.Contract(addr, AUCTION_ABI, provider);
