@@ -1178,6 +1178,14 @@ if (standard === "erc1155") {
 
     // advance cursor only after batch processed
     st.lastProcessedBlock = toBlock;
+    if (isAuction) {
+      const latest = loadState(addr);
+      st.currentAuctionTokenId = st.currentAuctionTokenId ?? latest.currentAuctionTokenId ?? null;
+      st.pendingAuctions = st.pendingAuctions ?? latest.pendingAuctions ?? {};
+      st.lastBidWeiByToken = st.lastBidWeiByToken ?? latest.lastBidWeiByToken ?? {};
+      st.lastBidderByToken = st.lastBidderByToken ?? latest.lastBidderByToken ?? {};
+    }
+    console.log(`[pollOnce] pre-save addr=${addr} keys=${Object.keys(st).join(",")}`);
     saveState(addr, st);
   }
 }
