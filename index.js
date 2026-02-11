@@ -1077,7 +1077,7 @@ if (!isAuction) {
   if (!tokenIdStr || tokenIdStr === "unknown") {
     try {
       const t = await contract.totalSupply({ blockTag: log.blockNumber });
-      tokenIdStr = tokenIdFromTotalSupply(t);
+      tokenIdStr = tokenIdFromTotalSupply(t, collection.tokenIdBase ?? 0);
       freshState.currentAuctionTokenId = tokenIdStr;
     } catch {
       tokenIdStr = "unknown";
