@@ -37,6 +37,19 @@ const provider = new ethers.JsonRpcProvider(process.env.RPC_HTTP_URL);
 // =========================
 // Persistent data dir (Railway Volume should mount to /data)
 // =========================
+const isRailway = Object.keys(process.env).some((k) => k.startsWith("RAILWAY_"));
+if (isRailway) {
+  const railwayDataDir = process.env.DATA_DIR;
+  const validRailwayDataDir =
+    typeof railwayDataDir === "string" &&
+    (railwayDataDir === "/data" || railwayDataDir.startsWith("/data"));
+
+  if (!validRailwayDataDir) {
+    console.error(`❌ Invalid DATA_DIR for Railway: "${railwayDataDir || ""}"`);
+    console.error("❌ On Railway, DATA_DIR must be set to /data (or a subpath under /data).");
+    process.exit(1);
+  }
+}
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
