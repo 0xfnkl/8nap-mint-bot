@@ -1070,19 +1070,21 @@ if (!isAuction) {
 
   const freshState = loadState(addr);
 
-  // Best source: last revealed piece for the auction
+  // Prefer on-chain inference at this block so stale disk state can't leak
+  // previous-auction token ids into new bid messages.
   let tokenIdStr = freshState.currentAuctionTokenId;
-
-  // Fallback: infer from totalSupply at this block
-  if (!tokenIdStr || tokenIdStr === "unknown") {
-    try {
-      const t = await contract.totalSupply({ blockTag: log.blockNumber });
-      tokenIdStr = tokenIdFromTotalSupply(t, collection.tokenIdBase ?? 0);
-      freshState.currentAuctionTokenId = tokenIdStr;
-    } catch {
-      tokenIdStr = "unknown";
+  try {
+    const t = await contract.totalSupply({ blockTag: log.blockNumber });
+    const inferred = tokenIdFromTotalSupply(t, collection.tokenIdBase ?? 0);
+    if (inferred && inferred !== "unknown") {
+      tokenIdStr = inferred;
+      freshState.currentAuctionTokenId = inferred;
     }
+  } catch {
+    // fallback to persisted value
   }
+
+  if (!tokenIdStr || tokenIdStr === "unknown") tokenIdStr = "unknown";
 
   const prevBidWeiStr =
     tokenIdStr !== "unknown" ? (freshState.lastBidWeiByToken[tokenIdStr] ?? null) : null;
@@ -1093,6 +1095,7 @@ if (!isAuction) {
 
   if (tokenIdStr !== "unknown") {
     freshState.lastBidWeiByToken[tokenIdStr] = amount.toString();
+    freshState.lastBidderByToken[tokenIdStr] = bidder;
     saveState(addr, freshState);
   }
 
@@ -1337,10 +1340,26 @@ if (standard === "erc1155") {
     st.lastProcessedBlock = toBlock;
     if (isAuction) {
       const latest = loadState(addr);
-      st.currentAuctionTokenId = st.currentAuctionTokenId ?? latest.currentAuctionTokenId ?? null;
-      st.pendingAuctions = st.pendingAuctions ?? latest.pendingAuctions ?? {};
-      st.lastBidWeiByToken = st.lastBidWeiByToken ?? latest.lastBidWeiByToken ?? {};
-      st.lastBidderByToken = st.lastBidderByToken ?? latest.lastBidderByToken ?? {};
+      const latestPending =
+        latest.pendingAuctions && typeof latest.pendingAuctions === "object"
+          ? latest.pendingAuctions
+          : null;
+      const latestBidWei =
+        latest.lastBidWeiByToken && typeof latest.lastBidWeiByToken === "object"
+          ? latest.lastBidWeiByToken
+          : null;
+      const latestBidder =
+        latest.lastBidderByToken && typeof latest.lastBidderByToken === "object"
+          ? latest.lastBidderByToken
+          : null;
+
+      // Keep dedupe/cursor fields from `st`, but always take auction lifecycle data
+      // from the freshest state on disk so we don't roll token/bid state backwards.
+      st.currentAuctionTokenId =
+        latest.currentAuctionTokenId ?? st.currentAuctionTokenId ?? null;
+      st.pendingAuctions = latestPending ?? st.pendingAuctions ?? {};
+      st.lastBidWeiByToken = latestBidWei ?? st.lastBidWeiByToken ?? {};
+      st.lastBidderByToken = latestBidder ?? st.lastBidderByToken ?? {};
     }
     saveState(addr, st);
   }
