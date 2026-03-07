@@ -104,11 +104,13 @@ if (!process.env.RPC_HTTP_URL) {
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ZERO_ADDRESS_LOWER = ZERO_ADDRESS.toLowerCase();
 const CHAIN = "ethereum";
 
 const POLL_MS = Number(process.env.POLL_MS || 15000);          // 15s
 const CONFIRMATIONS = Number(process.env.CONFIRMATIONS || 2);  // reorg safety
 const MAX_BLOCK_RANGE = Number(process.env.MAX_BLOCK_RANGE || 5); // <= 10 for Alchemy free constraints
+const HOLDERS_MAX_BLOCK_RANGE = Math.max(MAX_BLOCK_RANGE, 5000);
 
 // =========================
 // Provider (polling-first)
@@ -257,6 +259,8 @@ function saveLedgerPostState(st) {
 // Ledger directory should live on the persistent volume (DATA_DIR)
 const LEDGER_DIR = path.join(DATA_DIR, "ledger");
 if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR, { recursive: true });
+const TEMP_DIR = path.join(DATA_DIR, "tmp");
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 
 function monthKeyFromMs(ms) {
   const d = new Date(ms);
@@ -406,6 +410,10 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.editReply({ content });
       return;
     }
+    if (interaction.commandName === "holders") {
+      await handleHoldersCommand(interaction);
+      return;
+    }
     if (interaction.commandName !== "ledgercsv") return;
 
     // optional arg: month like "2026-01"
@@ -439,17 +447,21 @@ await interaction.editReply({
   } catch (e) {
     console.error("interactionCreate error:", e?.message || e);
     console.error(e);
+    const fallbackError =
+      interaction.commandName === "holders"
+        ? "Error generating holders CSV."
+        : "Error generating ledger CSV.";
     // if interaction already replied, followUp, else reply
     try {
       if (interaction.replied || interaction.deferred) {
       await interaction.followUp({
-  content: "Error generating ledger CSV.",
+  content: fallbackError,
   ephemeral: true,
 });
 
       } else {
         await interaction.reply({
-  content: "Error generating ledger CSV.",
+  content: fallbackError,
   ephemeral: true,
 });
 
@@ -503,9 +515,516 @@ const AUCTION_ABI = [
   "function totalSupply() view returns (uint256)",
 ];
 
+const ERC165_ABI = [
+  "function supportsInterface(bytes4 interfaceId) view returns (bool)",
+];
+
+const ERC721_TRANSFER_IFACE = new ethers.Interface([
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
+]);
+const ERC1155_TRANSFER_IFACE = new ethers.Interface([
+  "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
+  "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)",
+]);
+
+const ERC721_TRANSFER_TOPIC = ERC721_TRANSFER_IFACE.getEvent("Transfer").topicHash;
+const ERC1155_TRANSFER_SINGLE_TOPIC = ERC1155_TRANSFER_IFACE.getEvent("TransferSingle").topicHash;
+const ERC1155_TRANSFER_BATCH_TOPIC = ERC1155_TRANSFER_IFACE.getEvent("TransferBatch").topicHash;
+
 // =========================
 // Helpers (metadata, ENS, price)
 // =========================
+
+function parseTokenIdOption(rawTokenId) {
+  if (rawTokenId == null) return null;
+  const value = String(rawTokenId).trim();
+  if (!/^\d+$/.test(value)) {
+    throw new Error("token_id must be a non-negative integer.");
+  }
+  return BigInt(value);
+}
+
+function applyBalanceDelta(balanceMap, walletAddressLower, delta) {
+  if (!walletAddressLower || delta === 0n) return;
+  const next = (balanceMap.get(walletAddressLower) || 0n) + delta;
+  if (next > 0n) {
+    balanceMap.set(walletAddressLower, next);
+  } else {
+    balanceMap.delete(walletAddressLower);
+  }
+}
+
+function holderRowsFromBalanceMap(balanceMap) {
+  const rows = [];
+  for (const [wallet, quantity] of balanceMap.entries()) {
+    if (quantity > 0n) rows.push({ wallet, quantity });
+  }
+
+  rows.sort((a, b) => {
+    if (a.quantity === b.quantity) {
+      if (a.wallet < b.wallet) return -1;
+      if (a.wallet > b.wallet) return 1;
+      return 0;
+    }
+    return a.quantity > b.quantity ? -1 : 1;
+  });
+
+  return rows;
+}
+
+function buildHoldersCsv(rows) {
+  const lines = ["WalletAddress,Quantity"];
+  for (const row of rows) {
+    lines.push(`${csvEscape(row.wallet)},${csvEscape(row.quantity.toString())}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function holdersFilename(contractAddressLower, tokenId = null) {
+  const date = new Date().toISOString().slice(0, 10);
+  if (tokenId == null) return `holders-${date}-${contractAddressLower}.csv`;
+  return `holders-${date}-${contractAddressLower}-token-${tokenId.toString()}.csv`;
+}
+
+function writeTempCsv(baseName, csvText) {
+  const nonce = `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
+  const tempPath = path.join(TEMP_DIR, `${nonce}-${baseName}`);
+  fs.writeFileSync(tempPath, csvText, "utf8");
+  return tempPath;
+}
+
+function safeDeleteFile(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {}
+}
+
+async function scanLogsBounded({ address, fromBlock, toBlock, topics, maxRange = HOLDERS_MAX_BLOCK_RANGE, onLogs }) {
+  if (fromBlock > toBlock) return;
+  const ceilingRange = Math.max(1, Number(maxRange) || 1);
+  let currentRange = ceilingRange;
+
+  for (let start = fromBlock; start <= toBlock;) {
+    const end = Math.min(start + currentRange - 1, toBlock);
+    let logs = [];
+    try {
+      logs = await provider.getLogs({
+        address,
+        fromBlock: start,
+        toBlock: end,
+        topics,
+      });
+    } catch (e) {
+      if (currentRange === 1) {
+        throw new Error(`getLogs failed for block ${start}: ${e.message}`);
+      }
+      currentRange = Math.max(1, Math.floor(currentRange / 2));
+      continue;
+    }
+
+    if (logs.length > 1) {
+      logs.sort((a, b) => {
+        if (a.blockNumber !== b.blockNumber) return a.blockNumber - b.blockNumber;
+        return a.index - b.index;
+      });
+    }
+
+    const keepGoing = await onLogs(logs, start, end);
+    if (keepGoing === false) break;
+
+    if (logs.length < 2000 && currentRange < ceilingRange) {
+      currentRange = Math.min(ceilingRange, currentRange * 2);
+    }
+
+    start = end + 1;
+  }
+}
+
+async function safeSupportsInterface(contract, interfaceId) {
+  try {
+    return await contract.supportsInterface(interfaceId);
+  } catch {
+    return null;
+  }
+}
+
+async function callSucceeds(fn) {
+  try {
+    await fn();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasLogsInRecentRange(contractAddress, topics, safeHead, lookbackBlocks) {
+  if (safeHead <= 0) return false;
+  const fromBlock = Math.max(0, safeHead - lookbackBlocks + 1);
+  let found = false;
+
+  await scanLogsBounded({
+    address: contractAddress,
+    fromBlock,
+    toBlock: safeHead,
+    topics,
+    onLogs: async (logs) => {
+      if (logs.length > 0) {
+        found = true;
+        return false;
+      }
+      return true;
+    },
+  });
+
+  return found;
+}
+
+async function detectNftStandard(contractAddress, safeHead) {
+  const address = ethers.getAddress(contractAddress);
+  const code = await provider.getCode(address, safeHead);
+  if (!code || code === "0x") {
+    return {
+      standard: null,
+      detectionMethod: "no-contract",
+      reason: "No contract code found at this address.",
+    };
+  }
+
+  const erc165Contract = new ethers.Contract(address, ERC165_ABI, provider);
+  const supports165 = await safeSupportsInterface(erc165Contract, "0x01ffc9a7");
+
+  if (supports165 === true) {
+    const is721 = await safeSupportsInterface(erc165Contract, "0x80ac58cd");
+    const is1155 = await safeSupportsInterface(erc165Contract, "0xd9b67a26");
+
+    if (is721 === true && is1155 !== true) {
+      return { standard: "erc721", detectionMethod: "erc165" };
+    }
+    if (is1155 === true && is721 !== true) {
+      return { standard: "erc1155", detectionMethod: "erc165" };
+    }
+  }
+
+  let erc721Score = 0;
+  let erc1155Score = 0;
+  const probeWallet = "0x000000000000000000000000000000000000dEaD";
+  const codeLower = code.toLowerCase();
+
+  // Bytecode selector hints help avoid false-positive ERC20 classification.
+  if (codeLower.includes("6352211e")) erc721Score += 2; // ownerOf(uint256)
+  if (codeLower.includes("42842e0e") || codeLower.includes("b88d4fde")) erc721Score += 1; // safeTransferFrom(...)
+  if (codeLower.includes("00fdd58e")) erc1155Score += 2; // balanceOf(address,uint256)
+  if (codeLower.includes("2eb2c2d6")) erc1155Score += 1; // safeBatchTransferFrom(...)
+
+  const erc721Probe = new ethers.Contract(
+    address,
+    ["function balanceOf(address owner) view returns (uint256)"],
+    provider
+  );
+  if (await callSucceeds(() => erc721Probe.balanceOf(probeWallet))) erc721Score += 1;
+
+  const erc1155BalanceProbe = new ethers.Contract(
+    address,
+    ["function balanceOf(address account, uint256 id) view returns (uint256)"],
+    provider
+  );
+  if (await callSucceeds(() => erc1155BalanceProbe.balanceOf(probeWallet, 0n))) erc1155Score += 2;
+
+  const erc721TokenUriProbe = new ethers.Contract(
+    address,
+    ["function tokenURI(uint256 tokenId) view returns (string)"],
+    provider
+  );
+  if (await callSucceeds(() => erc721TokenUriProbe.tokenURI(0n))) erc721Score += 1;
+
+  const erc1155UriProbe = new ethers.Contract(
+    address,
+    ["function uri(uint256 id) view returns (string)"],
+    provider
+  );
+  if (await callSucceeds(() => erc1155UriProbe.uri(0n))) erc1155Score += 1;
+
+  if (erc721Score >= 2 && erc721Score > erc1155Score) {
+    return { standard: "erc721", detectionMethod: "heuristic-method-probe" };
+  }
+  if (erc1155Score >= 2 && erc1155Score > erc721Score) {
+    return { standard: "erc1155", detectionMethod: "heuristic-method-probe" };
+  }
+
+  const lookbackBlocks = Math.max(HOLDERS_MAX_BLOCK_RANGE * 4, 500);
+  const has721Logs = await hasLogsInRecentRange(
+    address,
+    [[ERC721_TRANSFER_TOPIC]],
+    safeHead,
+    lookbackBlocks
+  );
+  const has1155Logs = await hasLogsInRecentRange(
+    address,
+    [[ERC1155_TRANSFER_SINGLE_TOPIC, ERC1155_TRANSFER_BATCH_TOPIC]],
+    safeHead,
+    lookbackBlocks
+  );
+
+  if (has721Logs && !has1155Logs && erc721Score >= 2) {
+    return { standard: "erc721", detectionMethod: "heuristic-log-shape" };
+  }
+  if (has1155Logs && !has721Logs && erc1155Score >= 2) {
+    return { standard: "erc1155", detectionMethod: "heuristic-log-shape" };
+  }
+
+  return {
+    standard: null,
+    detectionMethod: "unknown",
+    reason: "Unable to confidently detect ERC721 vs ERC1155.",
+  };
+}
+
+async function findContractDeploymentBlock(contractAddress, safeHead) {
+  const codeAtSafeHead = await provider.getCode(contractAddress, safeHead);
+  if (!codeAtSafeHead || codeAtSafeHead === "0x") return null;
+
+  let lo = 0;
+  let hi = safeHead;
+  let answer = safeHead;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    let codeAtMid;
+    try {
+      codeAtMid = await provider.getCode(contractAddress, mid);
+    } catch (e) {
+      throw new Error(`Failed to read historical code at block ${mid}: ${e.message}`);
+    }
+
+    if (codeAtMid && codeAtMid !== "0x") {
+      answer = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  return answer;
+}
+
+async function resolveHoldersScanStartBlock(contractAddress, safeHead) {
+  try {
+    const deploymentBlock = await findContractDeploymentBlock(contractAddress, safeHead);
+    if (deploymentBlock != null) return deploymentBlock;
+  } catch (e) {
+    console.log(`⚠️ deployment block lookup failed for ${contractAddress}: ${e.message}`);
+  }
+
+  return 0;
+}
+
+async function buildErc721HolderBalances(contractAddress, fromBlock, toBlock) {
+  const balances = new Map();
+  let transferLogCount = 0;
+
+  await scanLogsBounded({
+    address: contractAddress,
+    fromBlock,
+    toBlock,
+    topics: [[ERC721_TRANSFER_TOPIC]],
+    onLogs: async (logs) => {
+      for (const log of logs) {
+        let parsed;
+        try {
+          parsed = ERC721_TRANSFER_IFACE.parseLog(log);
+        } catch {
+          continue;
+        }
+
+        if (parsed.name !== "Transfer") continue;
+        transferLogCount += 1;
+
+        const from = String(parsed.args.from).toLowerCase();
+        const to = String(parsed.args.to).toLowerCase();
+
+        if (from !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, from, -1n);
+        if (to !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, to, 1n);
+      }
+      return true;
+    },
+  });
+
+  return { balances, transferLogCount };
+}
+
+async function buildErc1155HolderBalances(contractAddress, fromBlock, toBlock, tokenId = null) {
+  const balances = new Map();
+  let transferLogCount = 0;
+  let matchedTransferCount = 0;
+
+  await scanLogsBounded({
+    address: contractAddress,
+    fromBlock,
+    toBlock,
+    topics: [[ERC1155_TRANSFER_SINGLE_TOPIC, ERC1155_TRANSFER_BATCH_TOPIC]],
+    onLogs: async (logs) => {
+      for (const log of logs) {
+        let parsed;
+        try {
+          parsed = ERC1155_TRANSFER_IFACE.parseLog(log);
+        } catch {
+          continue;
+        }
+
+        transferLogCount += 1;
+
+        if (parsed.name === "TransferSingle") {
+          const id = BigInt(parsed.args.id.toString());
+          if (tokenId != null && id !== tokenId) continue;
+
+          const value = BigInt(parsed.args.value.toString());
+          if (value <= 0n) continue;
+          matchedTransferCount += 1;
+
+          const from = String(parsed.args.from).toLowerCase();
+          const to = String(parsed.args.to).toLowerCase();
+
+          if (from !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, from, -value);
+          if (to !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, to, value);
+          continue;
+        }
+
+        if (parsed.name === "TransferBatch") {
+          const ids = parsed.args.ids || [];
+          const values = parsed.args.values || [];
+          let moved = 0n;
+
+          for (let i = 0; i < ids.length; i++) {
+            const id = BigInt(ids[i].toString());
+            if (tokenId != null && id !== tokenId) continue;
+            moved += BigInt(values[i].toString());
+          }
+
+          if (moved <= 0n) continue;
+          matchedTransferCount += 1;
+
+          const from = String(parsed.args.from).toLowerCase();
+          const to = String(parsed.args.to).toLowerCase();
+
+          if (from !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, from, -moved);
+          if (to !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, to, moved);
+        }
+      }
+      return true;
+    },
+  });
+
+  return { balances, transferLogCount, matchedTransferCount };
+}
+
+async function handleHoldersCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  let tempCsvPath = null;
+  try {
+    const rawContract = String(interaction.options.getString("contract", true) || "").trim();
+    const tokenId = parseTokenIdOption(interaction.options.getString("token_id"));
+
+    if (!ethers.isAddress(rawContract)) {
+      await interaction.editReply({
+        content: "Invalid contract address. Please provide a valid EVM address.",
+      });
+      return;
+    }
+
+    const contractAddress = ethers.getAddress(rawContract);
+
+    const head = await provider.getBlockNumber();
+    const safeHead = head - CONFIRMATIONS;
+    if (safeHead <= 0) {
+      await interaction.editReply({
+        content: "Chain head is not ready yet. Please try again shortly.",
+      });
+      return;
+    }
+
+    const detected = await detectNftStandard(contractAddress, safeHead);
+    if (!detected.standard) {
+      await interaction.editReply({
+        content: `Could not detect ERC721/ERC1155 for ${contractAddress}. ${detected.reason || ""}`.trim(),
+      });
+      return;
+    }
+
+    const fromBlock = await resolveHoldersScanStartBlock(contractAddress, safeHead);
+    const contractLower = contractAddress.toLowerCase();
+
+    let balances;
+    let transferLogCount = 0;
+    let matchedTransferCount = 0;
+    let modeLabel = "";
+    let note = null;
+    let outputTokenId = null;
+
+    if (detected.standard === "erc721") {
+      const erc721Result = await buildErc721HolderBalances(contractAddress, fromBlock, safeHead);
+      balances = erc721Result.balances;
+      transferLogCount = erc721Result.transferLogCount;
+      modeLabel = "ERC721 collection-wide";
+
+      if (tokenId != null) {
+        note = "token_id was provided but ignored because ERC721 exports are collection-wide.";
+      }
+    } else {
+      if (tokenId != null) {
+        const erc1155TokenResult = await buildErc1155HolderBalances(contractAddress, fromBlock, safeHead, tokenId);
+        balances = erc1155TokenResult.balances;
+        transferLogCount = erc1155TokenResult.transferLogCount;
+        matchedTransferCount = erc1155TokenResult.matchedTransferCount;
+        modeLabel = `ERC1155 token ${tokenId.toString()}`;
+        outputTokenId = tokenId;
+      } else {
+        const erc1155ContractResult = await buildErc1155HolderBalances(contractAddress, fromBlock, safeHead, null);
+        balances = erc1155ContractResult.balances;
+        transferLogCount = erc1155ContractResult.transferLogCount;
+        matchedTransferCount = erc1155ContractResult.matchedTransferCount;
+        modeLabel = "ERC1155 full contract (total units)";
+      }
+    }
+
+    const rows = holderRowsFromBalanceMap(balances);
+    const csvText = buildHoldersCsv(rows);
+    const outputName = holdersFilename(contractLower, outputTokenId);
+    tempCsvPath = writeTempCsv(outputName, csvText);
+
+    const summaryLines = [
+      `Detected standard: **${detected.standard.toUpperCase()}** (${detected.detectionMethod})`,
+      `Mode: **${modeLabel}**`,
+      `Wallets exported: **${rows.length}**`,
+      `Scanned blocks: **${fromBlock}-${safeHead}**`,
+    ];
+
+    if (detected.standard === "erc1155" && tokenId != null) {
+      summaryLines.push(`Token transfer events matched: **${matchedTransferCount}**`);
+    }
+    if (transferLogCount === 0) {
+      summaryLines.push("No transfer logs were found for this contract.");
+    }
+    if (detected.standard === "erc1155" && tokenId != null && rows.length === 0) {
+      summaryLines.push("No current holders found for that token_id.");
+    }
+    if (note) summaryLines.push(note);
+
+    const attachment = new AttachmentBuilder(tempCsvPath, { name: outputName });
+    await interaction.editReply({
+      content: summaryLines.join("\n"),
+      files: [attachment],
+    });
+  } catch (e) {
+    console.error("holders command error:", e?.message || e);
+    console.error(e);
+    await interaction.editReply({
+      content: "Error generating holders CSV.",
+    });
+  } finally {
+    safeDeleteFile(tempCsvPath);
+  }
+}
 
 async function retryAsync(fn, retries = 3, delay = 1000) {
   for (let i = 0; i < retries; i++) {
@@ -1387,6 +1906,22 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName("status")
       .setDescription("Show bot status and per-collection progress")
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("holders")
+      .setDescription("Export current holder balances as CSV (ERC721 or ERC1155)")
+      .addStringOption((opt) =>
+        opt
+          .setName("contract")
+          .setDescription("Contract address (0x...)")
+          .setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("token_id")
+          .setDescription("Optional ERC1155 token id (integer). Ignored for ERC721.")
+          .setRequired(false)
+      )
       .toJSON(),
   ];
 
