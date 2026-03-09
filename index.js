@@ -2091,6 +2091,8 @@ process.on("uncaughtException", (err) => {
 
 const LEDGER_CSV_CHANNEL_ID = process.env.LEDGER_CSV_CHANNEL_ID || "1463682240671387952";
 const DISCORD_STARTUP_TIMEOUT_MS = 60000;
+const DISCORD_LOGIN_BACKOFF_MIN_MS = 5000;
+const DISCORD_LOGIN_BACKOFF_MAX_MS = 20000;
 let discordStartupTimeout = null;
 
 async function runMonthlyLedgerPosterTick() {
@@ -2148,19 +2150,25 @@ client.once("clientReady", async () => {
 console.log("[startup] clientReady handler registered");
 
 console.log("[startup] about to call client.login(...)");
-discordStartupTimeout = setTimeout(() => {
-  console.error(`[fatal] Discord startup timed out before ready after ${DISCORD_STARTUP_TIMEOUT_MS}ms`);
-  process.exit(1);
-}, DISCORD_STARTUP_TIMEOUT_MS);
-console.log("[discord] login start");
-client
-  .login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => {
-    console.log("[discord] login resolved");
-  })
-  .catch((e) => {
-    console.error("[discord] login rejected:", e?.message || e);
-    console.error("[fatal] client.login failed:", e?.message || e);
-    console.error(e);
+const discordLoginDelayMs =
+  Math.floor(Math.random() * (DISCORD_LOGIN_BACKOFF_MAX_MS - DISCORD_LOGIN_BACKOFF_MIN_MS + 1)) +
+  DISCORD_LOGIN_BACKOFF_MIN_MS;
+console.log(`[startup] delaying Discord login by ${discordLoginDelayMs}ms before retryable startup attempt`);
+setTimeout(() => {
+  discordStartupTimeout = setTimeout(() => {
+    console.error(`[fatal] Discord startup timed out before ready after ${DISCORD_STARTUP_TIMEOUT_MS}ms`);
     process.exit(1);
-  });
+  }, DISCORD_STARTUP_TIMEOUT_MS);
+  console.log("[discord] login start");
+  client
+    .login(process.env.DISCORD_BOT_TOKEN)
+    .then(() => {
+      console.log("[discord] login resolved");
+    })
+    .catch((e) => {
+      console.error("[discord] login rejected:", e?.message || e);
+      console.error("[fatal] client.login failed:", e?.message || e);
+      console.error(e);
+      process.exit(1);
+    });
+}, discordLoginDelayMs);
