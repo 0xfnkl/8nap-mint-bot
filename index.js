@@ -65,26 +65,6 @@ function validateConfig(cfg) {
       if (collection.isAuction === true && String(collection.standard || "").toLowerCase() !== "erc721") {
         errors.push(`${where}.isAuction=true requires standard="erc721".`);
       }
-      const hasMaxSupply = collection.maxSupply !== undefined;
-      const hasAuctionRemainingThreshold = collection.auctionRemainingThreshold !== undefined;
-      if (hasMaxSupply !== hasAuctionRemainingThreshold) {
-        errors.push(`${where}.maxSupply and ${where}.auctionRemainingThreshold must be provided together.`);
-      }
-      if (hasMaxSupply && hasAuctionRemainingThreshold) {
-        if (!Number.isInteger(collection.maxSupply) || collection.maxSupply <= 0) {
-          errors.push(`${where}.maxSupply must be a positive integer when provided.`);
-        }
-        if (!Number.isInteger(collection.auctionRemainingThreshold) || collection.auctionRemainingThreshold < 0) {
-          errors.push(`${where}.auctionRemainingThreshold must be a non-negative integer when provided.`);
-        }
-        if (
-          Number.isInteger(collection.maxSupply) &&
-          Number.isInteger(collection.auctionRemainingThreshold) &&
-          collection.auctionRemainingThreshold > collection.maxSupply
-        ) {
-          errors.push(`${where}.auctionRemainingThreshold cannot exceed ${where}.maxSupply.`);
-        }
-      }
 
       if (collection.previewS3Id !== undefined && !Number.isFinite(collection.previewS3Id)) {
         errors.push(`${where}.previewS3Id must be a number when provided.`);
@@ -1171,8 +1151,10 @@ function openseaUrl(contractAddress, tokenId) {
   return `https://opensea.io/assets/${CHAIN}/${contractAddress}/${tokenId}`;
 }
 
-function auctionViewLink(collection) {
-  return collection?.auctionViewUrl || "https://8nap.art";
+function auctionViewLink(collectionName) {
+  return collectionName === "Issues"
+    ? "https://8nap.art/collection/issues"
+    : "https://8nap.art/collection/metamorphosis";
 }
 
 function s3Preview(collection, tokenIdStr) {
@@ -1226,7 +1208,7 @@ if (tokenIdStr !== "unknown") {
         `Winner: **${winnerDisplay}**`,
         `Amount: **${amountEth} ETH**`,
         ``,
-        `[View on 8NAP](${auctionViewLink(collection)})`,
+        `[View on 8NAP](${auctionViewLink(collection.name)})`,
         `Tx: https://etherscan.io/tx/${txHash}`,
       ].join("\n")
     )
@@ -1364,7 +1346,7 @@ async function postPieceRevealed(collection, tokenIdStr, txHash, blockNumber) {
         ``,
         `Auction is now live.`,
         ``,
-        `[View on 8NAP](${auctionViewLink(collection)})`,
+        `[View on 8NAP](${auctionViewLink(collection.name)})`,
         `Tx: https://etherscan.io/tx/${txHash}`,
       ].join("\n")
     )
@@ -1409,7 +1391,7 @@ if (tokenIdStr !== "unknown") {
         `Bidder: **${bidderDisplay}**`,
         `Amount: **${amountEth} ETH**`,
         ``,
-        `[View on 8NAP](${auctionViewLink(collection)})`,
+        `[View on 8NAP](${auctionViewLink(collection.name)})`,
         `Tx: https://etherscan.io/tx/${txHash}`,
       ].join("\n")
     )
@@ -1472,13 +1454,6 @@ async function pollOnce() {
     let topics;
 
     const isAuction = collection.isAuction === true;
-    const isHybridAuction =
-      isAuction &&
-      Number.isInteger(collection.maxSupply) &&
-      Number.isInteger(collection.auctionRemainingThreshold);
-    const hybridMaxSupply = isHybridAuction ? BigInt(collection.maxSupply) : null;
-    const hybridAuctionRemainingThreshold = isHybridAuction ? BigInt(collection.auctionRemainingThreshold) : null;
-    const hybridAuctionPhaseByBlock = {};
 
     if (standard === "erc721" && isAuction) {
       contract = new ethers.Contract(addr, AUCTION_ABI, provider);
@@ -1528,7 +1503,7 @@ async function pollOnce() {
 const mintUnitsByTx = {}; // txHash -> BigInt(total units minted in this tx for this contract)
 const txValueCache = {};  // txHash -> tx.value BigInt
 
-if (!isAuction || isHybridAuction) {
+if (!isAuction) {
   for (const lg of logs) {
     let p;
     try {
@@ -1588,24 +1563,10 @@ if (!isAuction || isHybridAuction) {
         if (!st.processed) st.processed = {};
         st.processed[k] = true;
       };
-      let hybridAuctionPhase = false;
-      if (isHybridAuction) {
-        const blockKey = String(log.blockNumber);
-        if (hybridAuctionPhaseByBlock[blockKey] === undefined) {
-          let auctionPhaseAtBlock = false;
-          try {
-            const totalSupplyAtBlock = await contract.totalSupply({ blockTag: log.blockNumber });
-            const remaining = hybridMaxSupply - BigInt(totalSupplyAtBlock.toString());
-            auctionPhaseAtBlock = remaining <= hybridAuctionRemainingThreshold;
-          } catch {}
-          hybridAuctionPhaseByBlock[blockKey] = auctionPhaseAtBlock;
-        }
-        hybridAuctionPhase = hybridAuctionPhaseByBlock[blockKey] === true;
-      }
 
       try {
         // ===== Auction (Issues/Metamorphosis) =====
-        if (standard === "erc721" && isAuction && (!isHybridAuction || hybridAuctionPhase)) {
+        if (standard === "erc721" && isAuction) {
           if (parsed.name === "PieceRevealed") {
             const freshState = loadState(addr);
 
@@ -1746,7 +1707,7 @@ if (!isAuction || isHybridAuction) {
         }
 
         // ===== ERC721 mint-only =====
-if (standard === "erc721" && (!isAuction || (isHybridAuction && !hybridAuctionPhase))) {
+if (standard === "erc721" && !isAuction) {
   if (parsed.name !== "Transfer") {
     markProcessed();
     continue;
