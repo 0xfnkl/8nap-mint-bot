@@ -8,6 +8,7 @@ A Node.js Discord bot that:
 4) Writes every detected mint into a monthly CSV ledger on a persistent Railway volume.
 5) On the 1st of each month, posts the previous month’s CSV into a Discord channel (“ledger-csv”).
 6) Provides a slash command `/ledgercsv` to fetch any month’s CSV on-demand.
+7) Provides a slash command `/holders` to export current holder balances as an attached CSV for arbitrary ERC721/ERC1155 contracts.
 
 This is designed to be robust and restart-safe via persisted state on `/data`.
 
@@ -67,6 +68,9 @@ The bot persists state and ledgers here. Key folders/files:
 - `/data/state/eth_price_usd.json`
   Cached ETH/USD price used ONLY for Discord display. Not written into the ledger.
 
+- `/data/tmp/`
+  Temporary directory used by `/holders` for one-off CSV attachments. Temp files are deleted after send.
+
 If the volume is missing or `DATA_DIR` is wrong, the bot may “work” but will not persist correctly across deploys.
 
 ---
@@ -93,11 +97,24 @@ Notes:
 
 ---
 
-## Slash command
+## Slash commands
 - `/ledgercsv` with optional `month` (YYYY-MM)
 Returns `mints-YYYY-MM.csv` from `/data/ledger`.
 
-This is the primary “sanity check” mechanism.
+- `/holders` with required `contract` and optional `token_id`
+  - Auto-detects standard (ERC165 first, then safe heuristics).
+  - ERC721 mode: always collection-wide; `token_id` is ignored.
+  - ERC1155 mode with `token_id`: exports holders for that token only.
+  - ERC1155 mode without `token_id`: exports holders across the whole contract with total token units aggregated per wallet.
+  - CSV headers are exactly: `WalletAddress,Quantity`.
+  - Rows are sorted by Quantity descending, then wallet ascending.
+  - Filename format:
+    - `holders-YYYY-MM-DD-<contract>.csv`
+    - `holders-YYYY-MM-DD-<contract>-token-<tokenid>.csv`
+
+`/ledgercsv` remains the primary monthly ledger sanity check.
+
+Important isolation: `/holders` does not write into `/data/ledger`, does not modify `mints-YYYY-MM.csv`, and does not touch `/data/state/ledger_post_state.json`.
 
 ---
 

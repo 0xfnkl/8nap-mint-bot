@@ -19,15 +19,27 @@
       "artist": "RedruM",
       "standard": "erc721",
       "isAuction": true,
+      "auctionViewUrl": "https://8nap.art/collection/metamorphosis",
       "previewS3Id": 107,
       "contractAddress": "0xD27Ca58bc4f70E95a7f193965AE60ffCE0D46A87",
       "tokenIdBase": 1
+    },
+    {
+      "name": "Relics of a Fractured Horizon",
+      "artist": "Ren",
+      "contractAddress": "0xb86CC4Be9a0b4Dea3B0F1622B3B470BC94Ea2C82",
+      "standard": "erc721",
+      "isAuction": true,
+      "auctionViewUrl": "https://8nap.art/collection/relics-of-a-fractured-horizon",
+      "maxSupply": 136,
+      "auctionRemainingThreshold": 10
     },
     {
       "name": "Issues",
       "artist": "DeltaSauce",
       "standard": "erc721",
       "isAuction": true,
+      "auctionViewUrl": "https://8nap.art/collection/issues",
       "previewS3Id": 74,
       "contractAddress": "0xbe27770b0263133B9D3A1D4c7C2760007B94e37f",
       "tokenIdBase": 1
