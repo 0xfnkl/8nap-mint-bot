@@ -13,6 +13,11 @@ This is designed to be robust and restart-safe via persisted state on `/data`.
 
 ---
 
+## Temporary Note
+Redeploy trigger after Railway initialization stall.
+
+---
+
 ## Repo structure (root)
 - `index.js`                Main entry point and all bot logic
 - `config.json`             Discord channel IDs + collections list
