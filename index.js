@@ -1542,6 +1542,18 @@ async function pollOnce() {
       // Do not advance cursor on failure
       continue;
     }
+
+    // deterministic ordering before processing and commit decisions
+    if (logs.length > 1) {
+      logs.sort((a, b) => {
+        const aBlock = Number(a.blockNumber ?? 0);
+        const bBlock = Number(b.blockNumber ?? 0);
+        if (aBlock !== bBlock) return aBlock - bBlock;
+        const aLogIndex = Number(a.logIndex ?? a.index ?? 0);
+        const bLogIndex = Number(b.logIndex ?? b.index ?? 0);
+        return aLogIndex - bLogIndex;
+      });
+    }
     // --------- Per-tx mint unit counting (for correct per-token pricing) ---------
 // For non-auction collections, tx.value is the TOTAL paid for the whole transaction.
 // If multiple tokens/units mint in one tx, we must divide by the number minted.
@@ -1592,6 +1604,7 @@ if (!isAuction) {
 }
 
     // Process logs in chain order
+    let failedLog = null;
     for (const log of logs) {
       const k = seenKey(log);
       if (st.processed?.[k]) continue;
@@ -1599,9 +1612,11 @@ if (!isAuction) {
       let parsed;
       try {
         parsed = iface.parseLog(log);
-      } catch {
+      } catch (e) {
         console.log(`[event] failed, will retry tx=${log.transactionHash}`);
-        continue;
+        console.error(`❌ Error parsing ${collection.name} log:`, e?.message || e);
+        failedLog = log;
+        break;
       }
 
       const markProcessed = () => {
@@ -1897,11 +1912,29 @@ if (standard === "erc1155") {
   console.log(`[event] failed, will retry tx=${log.transactionHash}`);
   console.error(`❌ Error handling ${collection.name} ${parsed.name}:`, e.message);
   console.error(e); // <-- this prints stack + more details
+  failedLog = log;
+  break;
 }
     }
 
-    // advance cursor only after batch processed
-    st.lastProcessedBlock = toBlock;
+    const failedBlockNumber = failedLog ? Number(failedLog.blockNumber) : null;
+    const hasFailedBlockNumber = Number.isFinite(failedBlockNumber);
+    const safeCompletedBlock =
+      failedBlockNumber == null
+        ? toBlock
+        : hasFailedBlockNumber
+          ? Math.max(fromBlock - 1, Math.min(toBlock, failedBlockNumber - 1))
+          : fromBlock - 1;
+
+    if (failedLog) {
+      const failedLogIndex = failedLog.logIndex ?? failedLog.index ?? "unknown";
+      console.error(
+        `[poll] stopped processing ${collection.name} at block=${failedLog.blockNumber} tx=${failedLog.transactionHash} logIndex=${failedLogIndex}; range ${fromBlock}-${toBlock} will be retried from block ${safeCompletedBlock + 1}`
+      );
+    }
+
+    // advance cursor only to the safely completed block range
+    st.lastProcessedBlock = safeCompletedBlock;
     if (isAuction) {
       const latest = loadState(addr);
       const latestPending =
