@@ -107,9 +107,24 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const ZERO_ADDRESS_LOWER = ZERO_ADDRESS.toLowerCase();
 const CHAIN = "ethereum";
 
-const POLL_MS = Number(process.env.POLL_MS || 15000);          // 15s
-const CONFIRMATIONS = Number(process.env.CONFIRMATIONS || 2);  // reorg safety
-const MAX_BLOCK_RANGE = Number(process.env.MAX_BLOCK_RANGE || 5); // <= 10 for Alchemy free constraints
+function parseValidatedIntegerEnv(name, fallback, min) {
+  const rawValue = process.env[name];
+  const resolvedRaw = rawValue === undefined ? String(fallback) : String(rawValue).trim();
+  const parsed = Number(resolvedRaw);
+
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min) {
+    console.error(
+      `❌ Invalid env var ${name}: "${rawValue}" (resolved value: "${resolvedRaw}"). Must be an integer >= ${min}.`
+    );
+    process.exit(1);
+  }
+
+  return parsed;
+}
+
+const POLL_MS = parseValidatedIntegerEnv("POLL_MS", 15000, 1000);          // 15s
+const CONFIRMATIONS = parseValidatedIntegerEnv("CONFIRMATIONS", 2, 0);     // reorg safety
+const MAX_BLOCK_RANGE = parseValidatedIntegerEnv("MAX_BLOCK_RANGE", 5, 1); // <= 10 for Alchemy free constraints
 const HOLDERS_MAX_BLOCK_RANGE = Math.max(MAX_BLOCK_RANGE, 5000);
 
 // =========================
