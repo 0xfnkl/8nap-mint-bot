@@ -363,6 +363,29 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 console.log("[startup] Discord client created");
+client.on("error", (err) => {
+  console.error("[discord] error:", err?.message || err);
+});
+client.on("warn", (msg) => {
+  console.warn("[discord] warn:", msg);
+});
+client.on("shardError", (err, shardId) => {
+  console.error(`[discord] shardError shard=${shardId}:`, err?.message || err);
+});
+client.on("shardDisconnect", (event, shardId) => {
+  console.warn(
+    `[discord] shardDisconnect shard=${shardId} code=${event?.code ?? "unknown"} reason=${event?.reason ?? "unknown"}`
+  );
+});
+client.on("shardReconnecting", (shardId) => {
+  console.warn(`[discord] shardReconnecting shard=${shardId}`);
+});
+client.on("shardResume", (shardId, replayedEvents) => {
+  console.log(`[discord] shardResume shard=${shardId} replayedEvents=${replayedEvents}`);
+});
+client.on("invalidated", () => {
+  console.error("[discord] invalidated");
+});
 
 const rateLimiter = {
   lastSent: 0,
@@ -2086,8 +2109,15 @@ client.once("clientReady", async () => {
 console.log("[startup] clientReady handler registered");
 
 console.log("[startup] about to call client.login(...)");
-client.login(process.env.DISCORD_BOT_TOKEN).catch((e) => {
-  console.error("[fatal] client.login failed:", e?.message || e);
-  console.error(e);
-  process.exit(1);
-});
+console.log("[discord] login start");
+client
+  .login(process.env.DISCORD_BOT_TOKEN)
+  .then(() => {
+    console.log("[discord] login resolved");
+  })
+  .catch((e) => {
+    console.error("[discord] login rejected:", e?.message || e);
+    console.error("[fatal] client.login failed:", e?.message || e);
+    console.error(e);
+    process.exit(1);
+  });
