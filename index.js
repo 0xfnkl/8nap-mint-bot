@@ -2108,16 +2108,58 @@ client.once("clientReady", async () => {
 });
 console.log("[startup] clientReady handler registered");
 
+async function runDiscordRestDiagnostic() {
+  console.log("[discord] rest-diagnostic start");
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const res = await fetch("https://discord.com/api/v10/users/@me", {
+      method: "GET",
+      headers: {
+        Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`,
+      },
+      signal: controller.signal,
+    });
+
+    console.log(`[discord] rest-diagnostic status=${res.status}`);
+    if (res.ok) {
+      let me = null;
+      try {
+        me = await res.json();
+      } catch {}
+      const username = me?.username || "unknown";
+      const id = me?.id || "unknown";
+      console.log(`[discord] rest-diagnostic success=true bot=${username} id=${id}`);
+    } else {
+      console.log("[discord] rest-diagnostic success=false");
+    }
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      console.error("[discord] rest-diagnostic timeout after 10000ms");
+    } else {
+      console.error("[discord] rest-diagnostic network-error:", e?.message || e);
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 console.log("[startup] about to call client.login(...)");
-console.log("[discord] login start");
-client
-  .login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => {
-    console.log("[discord] login resolved");
-  })
-  .catch((e) => {
-    console.error("[discord] login rejected:", e?.message || e);
-    console.error("[fatal] client.login failed:", e?.message || e);
-    console.error(e);
-    process.exit(1);
-  });
+(async () => {
+  await runDiscordRestDiagnostic();
+
+  console.log("[discord] login start");
+  client
+    .login(process.env.DISCORD_BOT_TOKEN)
+    .then(() => {
+      console.log("[discord] login resolved");
+    })
+    .catch((e) => {
+      console.error("[discord] login rejected:", e?.message || e);
+      console.error("[fatal] client.login failed:", e?.message || e);
+      console.error(e);
+      process.exit(1);
+    });
+})();
