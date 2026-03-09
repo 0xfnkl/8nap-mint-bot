@@ -405,9 +405,24 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.deferReply({ ephemeral: true });
 
       let headText = "unknown";
+      const STATUS_HEAD_TIMEOUT_MS = 4000;
+      let statusHeadTimeoutId = null;
       try {
-        headText = String(await provider.getBlockNumber());
-      } catch {}
+        const head = await Promise.race([
+          provider.getBlockNumber(),
+          new Promise((_, reject) => {
+            statusHeadTimeoutId = setTimeout(
+              () => reject(new Error(`status head lookup timed out after ${STATUS_HEAD_TIMEOUT_MS}ms`)),
+              STATUS_HEAD_TIMEOUT_MS
+            );
+          }),
+        ]);
+        headText = String(head);
+      } catch {
+        // keep fallback "unknown"
+      } finally {
+        if (statusHeadTimeoutId) clearTimeout(statusHeadTimeoutId);
+      }
 
       const rows = [
         "name | standard | isAuction | lastProcessedBlock",
