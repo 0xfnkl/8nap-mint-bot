@@ -13,6 +13,7 @@ const configPath = path.join(__dirname, "config.json");
 let config;
 try {
   config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  console.log("[startup] config loaded successfully");
 } catch (e) {
   console.error(`❌ Failed to read/parse config.json: ${e.message}`);
   process.exit(1);
@@ -93,6 +94,7 @@ function validateConfig(cfg) {
 }
 
 validateConfig(config);
+console.log("[startup] config validated successfully");
 
 if (!process.env.DISCORD_BOT_TOKEN) {
   console.error("❌ Missing env var: DISCORD_BOT_TOKEN");
@@ -102,6 +104,7 @@ if (!process.env.RPC_HTTP_URL) {
   console.error("❌ Missing env var: RPC_HTTP_URL (Alchemy HTTPS endpoint)");
   process.exit(1);
 }
+console.log("[startup] required env vars validated");
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const ZERO_ADDRESS_LOWER = ZERO_ADDRESS.toLowerCase();
@@ -126,12 +129,14 @@ const POLL_MS = parseValidatedIntegerEnv("POLL_MS", 15000, 1000);          // 15
 const CONFIRMATIONS = parseValidatedIntegerEnv("CONFIRMATIONS", 2, 0);     // reorg safety
 const MAX_BLOCK_RANGE = parseValidatedIntegerEnv("MAX_BLOCK_RANGE", 5, 1); // <= 10 for Alchemy free constraints
 const HOLDERS_MAX_BLOCK_RANGE = Math.max(MAX_BLOCK_RANGE, 5000);
+console.log("[startup] numeric env vars validated");
 
 // =========================
 // Provider (polling-first)
 // =========================
 
 const provider = new ethers.JsonRpcProvider(process.env.RPC_HTTP_URL);
+console.log("[startup] provider constructed");
 
 // =========================
 // Persistent data dir (Railway Volume should mount to /data)
@@ -276,6 +281,7 @@ const LEDGER_DIR = path.join(DATA_DIR, "ledger");
 if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR, { recursive: true });
 const TEMP_DIR = path.join(DATA_DIR, "tmp");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+console.log("[startup] data/state/ledger/tmp directories ensured");
 
 function monthKeyFromMs(ms) {
   const d = new Date(ms);
@@ -356,6 +362,7 @@ function appendMintToLedger(row, timestampMs) {
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
+console.log("[startup] Discord client created");
 
 const rateLimiter = {
   lastSent: 0,
@@ -1958,18 +1965,23 @@ let pollTimer = null;
 let pollInFlight = false;
 
 async function startPolling() {
+  console.log("[startup:startPolling] entering startPolling()");
   // initialize cursors to safe head on first boot, to avoid posting historical spam
   for (const collection of config.collections) {
+    console.log(`[startup:startPolling] before initializeStateToHeadIfEmpty collection=${collection.name}`);
     await initializeStateToHeadIfEmpty(collection);
+    console.log(`[startup:startPolling] after initializeStateToHeadIfEmpty collection=${collection.name}`);
   }
 
   console.log(`✅ Polling started. interval=${POLL_MS}ms confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
 
   // run immediately, then interval
+  console.log("[startup:startPolling] before first immediate pollOnce()");
   await pollOnce().catch((e) => {
   console.error("pollOnce error:", e.message);
   console.error(e);
 });
+  console.log("[startup:startPolling] after first immediate pollOnce() finishes");
 
 pollTimer = setInterval(() => {
   if (pollInFlight) {
@@ -1985,6 +1997,7 @@ pollTimer = setInterval(() => {
     pollInFlight = false;
   });
 }, POLL_MS);
+  console.log("[startup:startPolling] recurring poll interval started");
 }
 
 // Heartbeat
@@ -2012,6 +2025,13 @@ async function shutdown(signal) {
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("unhandledRejection", (reason) => {
+  console.error("[fatal] unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[fatal] uncaughtException:", err);
+  process.exit(1);
+});
 
 const LEDGER_CSV_CHANNEL_ID = process.env.LEDGER_CSV_CHANNEL_ID || "1463682240671387952";
 
@@ -2030,12 +2050,17 @@ async function runMonthlyLedgerPosterTick() {
 
 
 client.once("clientReady", async () => {
+  console.log("[startup] clientReady fired");
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
   try {
     // 3C.2: register slash commands on boot
+    console.log("[startup] about to run registerCommands()");
     await registerCommands();
+    console.log("[startup] registerCommands() completed");
 
+    console.log("[startup] about to run startPolling()");
     await startPolling();
+    console.log("[startup] startPolling() completed");
 
     // Start monthly poster (runs shortly after boot, then every 5 minutes)
     setTimeout(() => {
@@ -2051,11 +2076,18 @@ client.once("clientReady", async () => {
         console.error(e);
       });
     }, 5 * 60 * 1000);
+    console.log("[startup] monthly poster timers scheduled");
   } catch (e) {
     console.error("❌ Failed to start bot:", e.message);
     console.error(e);
     process.exit(1);
   }
 });
+console.log("[startup] clientReady handler registered");
 
-client.login(process.env.DISCORD_BOT_TOKEN);
+console.log("[startup] about to call client.login(...)");
+client.login(process.env.DISCORD_BOT_TOKEN).catch((e) => {
+  console.error("[fatal] client.login failed:", e?.message || e);
+  console.error(e);
+  process.exit(1);
+});
