@@ -15,6 +15,12 @@
       "contractAddress": "0x9551Ec1997Ad76fdf84240B7d5B4a5EDab829a19"
     },
     {
+      "name": "Relics of a Fractured Horizon",
+      "artist": "Ren",
+      "standard": "erc721",
+      "contractAddress": "0xb86CC4Be9a0b4Dea3B0F1622B3B470BC94Ea2C82"
+    },
+    {
       "name": "Metamorphosis",
       "artist": "RedruM",
       "standard": "erc721",
