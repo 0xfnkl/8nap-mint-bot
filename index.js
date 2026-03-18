@@ -408,6 +408,8 @@ function saveLedgerPostState(st) {
 // Ledger directory should live on the persistent volume (DATA_DIR)
 const LEDGER_DIR = path.join(DATA_DIR, "ledger");
 if (!fs.existsSync(LEDGER_DIR)) fs.mkdirSync(LEDGER_DIR, { recursive: true });
+const SALES_LEDGER_DIR = path.join(DATA_DIR, "ledger-sales");
+if (!fs.existsSync(SALES_LEDGER_DIR)) fs.mkdirSync(SALES_LEDGER_DIR, { recursive: true });
 const TEMP_DIR = path.join(DATA_DIR, "tmp");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 console.log("[startup] data/state/ledger/tmp directories ensured");
@@ -474,6 +476,58 @@ function appendMintToLedger(row, timestampMs) {
     row.Quantity,
     row.MinterWallet,
     row.ETHPrice,
+    row.TokenID,
+    row.Contract,
+    row.TxHash,
+    row.BlockNumber,
+    row.LogIndex,
+  ].map(csvEscape).join(",") + "\n";
+
+  fs.appendFileSync(filePath, line);
+}
+
+function salesLedgerPathForMonth(monthKey) {
+  return path.join(SALES_LEDGER_DIR, `sales-${monthKey}.csv`);
+}
+
+function ensureSalesLedgerHeader(filePath) {
+  if (fs.existsSync(filePath)) return;
+  const header = [
+    "DateUTC",
+    "ProjectKey",
+    "Collection",
+    "Standard",
+    "Quantity",
+    "SellerWallet",
+    "BuyerWallet",
+    "SalePriceNative",
+    "CurrencySymbol",
+    "Marketplace",
+    "TokenID",
+    "Contract",
+    "TxHash",
+    "BlockNumber",
+    "LogIndex",
+  ].join(",") + "\n";
+  fs.writeFileSync(filePath, header);
+}
+
+function appendSaleToLedger(row, timestampMs) {
+  const monthKey = monthKeyFromMs(timestampMs);
+  const filePath = salesLedgerPathForMonth(monthKey);
+  ensureSalesLedgerHeader(filePath);
+
+  const line = [
+    row.DateUTC,
+    row.ProjectKey,
+    row.Collection,
+    row.Standard,
+    row.Quantity,
+    row.SellerWallet,
+    row.BuyerWallet,
+    row.SalePriceNative,
+    row.CurrencySymbol,
+    row.Marketplace,
     row.TokenID,
     row.Contract,
     row.TxHash,
