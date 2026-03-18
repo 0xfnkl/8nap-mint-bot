@@ -235,6 +235,8 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
 const STATE_DIR = path.join(DATA_DIR, "state");
 if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR);
+const SALES_STATE_DIR = path.join(STATE_DIR, "sales");
+if (!fs.existsSync(SALES_STATE_DIR)) fs.mkdirSync(SALES_STATE_DIR, { recursive: true });
 
 // Persisted ETH/USD cache (for Discord display only, not used in the ledger)
 const ETH_PRICE_CACHE_PATH = path.join(STATE_DIR, "eth_price_usd.json");
@@ -321,6 +323,57 @@ function saveState(address, state) {
     state.processed = next;
   }
   fs.writeFileSync(stateFileFor(address), JSON.stringify(state, null, 2));
+}
+
+function salesStateFileFor(collectionKey) {
+  const safeKey = String(collectionKey || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "_");
+  return path.join(SALES_STATE_DIR, `${safeKey}.json`);
+}
+
+function loadSalesState(collectionKey) {
+  const fallback = {
+    version: 1,
+    lastProcessedBlock: 0,
+    processed: {},
+  };
+
+  try {
+    if (!collectionKey) return { ...fallback };
+
+    const p = salesStateFileFor(collectionKey);
+    if (!fs.existsSync(p)) return { ...fallback };
+
+    const raw = fs.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+
+    if (typeof parsed.version !== "number") parsed.version = 1;
+    if (typeof parsed.lastProcessedBlock !== "number") parsed.lastProcessedBlock = 0;
+    if (!parsed.processed || typeof parsed.processed !== "object") parsed.processed = {};
+
+    return parsed;
+  } catch (e) {
+    console.error(`❌ loadSalesState failed for ${collectionKey}:`, e.message);
+    return { ...fallback };
+  }
+}
+
+function saveSalesState(collectionKey, state) {
+  const keys = Object.keys(state.processed || {});
+  if (keys.length > 6000) {
+    const keep = keys.slice(-3000);
+    const next = {};
+    for (const k of keep) next[k] = true;
+    state.processed = next;
+  }
+
+  if (typeof state.version !== "number") state.version = 1;
+  if (typeof state.lastProcessedBlock !== "number") state.lastProcessedBlock = 0;
+  if (!state.processed || typeof state.processed !== "object") state.processed = {};
+
+  fs.writeFileSync(salesStateFileFor(collectionKey), JSON.stringify(state, null, 2));
 }
 
 function seenKey(log) {
