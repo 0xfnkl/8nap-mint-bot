@@ -2596,6 +2596,24 @@ client.once("clientReady", async () => {
     await startPolling();
     console.log("[startup] startPolling() completed");
 
+    if (process.env.SALES_RESET_STATE_ON_READY === "1") {
+      console.log("[sales] canary sales state reset scheduled");
+      setTimeout(() => {
+        console.log("[sales] canary sales state reset start");
+        try {
+          saveSalesState("0xbe27770b0263133b9d3a1d4c7c2760007b94e37f", {
+            version: 1,
+            lastProcessedBlock: 0,
+            processed: {},
+          });
+          console.log("[sales] canary sales state reset completed");
+        } catch (e) {
+          console.error("[sales] canary sales state reset failed:", e?.message || e);
+          console.error(e);
+        }
+      }, 0);
+    }
+
     if (process.env.SALES_MANUAL_POLL_ON_READY === "1") {
       console.log("[sales] manual sales poll scheduled delayMs=15000");
       setTimeout(() => {
