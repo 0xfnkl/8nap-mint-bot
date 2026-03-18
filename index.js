@@ -76,6 +76,12 @@ function validateOptionalSalesConfig(cfg) {
             errors.push(`${where}.standard must be "erc721" or "erc1155".`);
           }
         }
+
+        if (collection.startBlock !== undefined) {
+          if (!Number.isInteger(collection.startBlock) || collection.startBlock < 0) {
+            errors.push(`${where}.startBlock must be an integer >= 0 when provided.`);
+          }
+        }
       });
     }
   }
@@ -93,6 +99,7 @@ function validateOptionalSalesConfig(cfg) {
     collections: sales.collections.map((collection) => ({
       ...collection,
       standard: collection.standard.toLowerCase(),
+      ...(collection.startBlock !== undefined ? { startBlock: collection.startBlock } : {}),
     })),
   };
 }
@@ -753,19 +760,27 @@ async function pollSalesOnce() {
     const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
     const collectionKey = safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
     const currentState = loadSalesState(collectionKey);
-    const fromBlock = Number(currentState.lastProcessedBlock || 0) + 1;
+    const configuredStartBlock = Number.isInteger(collection.startBlock) && collection.startBlock >= 0
+      ? collection.startBlock
+      : 0;
+    const persistedLastProcessedBlock = Number(currentState.lastProcessedBlock || 0);
+    const effectiveLastProcessedBlock =
+      persistedLastProcessedBlock === 0 && configuredStartBlock > 0
+        ? Math.max(0, configuredStartBlock - 1)
+        : persistedLastProcessedBlock;
+    const fromBlock = effectiveLastProcessedBlock + 1;
     const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);
 
     console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}`);
 
     if (fromBlock > safeHead) {
-      console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${currentState.lastProcessedBlock} reason=no-new-blocks`);
+      console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${persistedLastProcessedBlock} reason=no-new-blocks`);
       continue;
     }
 
     const nextState = {
       version: currentState.version,
-      lastProcessedBlock: currentState.lastProcessedBlock,
+      lastProcessedBlock: persistedLastProcessedBlock,
       processed: { ...(currentState.processed || {}) },
     };
 
@@ -793,13 +808,13 @@ async function pollSalesOnce() {
 
       if (page.pageKey) {
         console.log(
-          `[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${currentState.lastProcessedBlock} reason=pageKey-present`
+          `[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${persistedLastProcessedBlock} reason=pageKey-present`
         );
       } else {
         nextState.lastProcessedBlock = toBlock;
         advancedAny = true;
         console.log(
-          `[sales] cursor advance collection=${collectionName} from=${currentState.lastProcessedBlock} to=${nextState.lastProcessedBlock}`
+          `[sales] cursor advance collection=${collectionName} from=${persistedLastProcessedBlock} to=${nextState.lastProcessedBlock}`
         );
       }
 
