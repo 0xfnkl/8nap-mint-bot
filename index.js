@@ -696,12 +696,17 @@ async function getNFTSalesPage(collection, options = {}) {
     throw new Error("collection.contractAddress is required.");
   }
 
+  const fromBlock = safeString(options.fromBlock || "0");
+  const toBlock = safeString(options.toBlock || "latest");
+  const order = normalizeOrder(options.order);
+  const limit = String(normalizeLimit(options.limit));
+
   const url = new URL(`${alchemyNftApiBaseUrlFromRpcUrl(process.env.RPC_HTTP_URL)}/getNFTSales`);
   url.searchParams.set("contractAddress", contractAddress);
-  url.searchParams.set("fromBlock", safeString(options.fromBlock || "0"));
-  url.searchParams.set("toBlock", safeString(options.toBlock || "latest"));
-  url.searchParams.set("order", normalizeOrder(options.order));
-  url.searchParams.set("limit", String(normalizeLimit(options.limit)));
+  url.searchParams.set("fromBlock", fromBlock);
+  url.searchParams.set("toBlock", toBlock);
+  url.searchParams.set("order", order);
+  url.searchParams.set("limit", limit);
   if (isNonEmptyString(options.pageKey)) {
     url.searchParams.set("pageKey", String(options.pageKey).trim());
   }
@@ -722,6 +727,33 @@ async function getNFTSalesPage(collection, options = {}) {
 
   const data = await res.json();
   const nftSales = Array.isArray(data?.nftSales) ? data.nftSales : [];
+  const isCanaryIssuesCollection =
+    contractAddress === "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f";
+
+  if (isCanaryIssuesCollection) {
+    console.log(
+      `[sales:raw] contractAddress=${contractAddress} fromBlock=${fromBlock} toBlock=${toBlock} order=${order} limit=${limit} nftSalesLength=${nftSales.length} pageKey=${isNonEmptyString(data?.pageKey) ? String(data.pageKey).trim() : ""} validAt=${JSON.stringify({
+        blockNumber: safeString(data?.validAt?.blockNumber).trim(),
+        blockHash: safeString(data?.validAt?.blockHash).trim().toLowerCase(),
+        blockTimestamp: safeString(data?.validAt?.blockTimestamp).trim(),
+      })}`
+    );
+
+    if (nftSales.length > 0) {
+      const firstRawSale = nftSales[0] || {};
+      console.log(
+        `[sales:raw] firstSale=${JSON.stringify({
+          marketplace: safeString(firstRawSale.marketplace).trim(),
+          contractAddress: safeLowercaseAddress(firstRawSale.contractAddress),
+          tokenId: safeString(firstRawSale.tokenId).trim(),
+          blockNumber: safeString(firstRawSale.blockNumber).trim(),
+          logIndex: safeString(firstRawSale.logIndex).trim(),
+          bundleIndex: safeString(firstRawSale.bundleIndex).trim(),
+          transactionHash: safeLowercaseString(firstRawSale.transactionHash),
+        })}`
+      );
+    }
+  }
 
   return {
     sales: nftSales.map((rawSale) => normalizeSaleRecord(rawSale, collection)),
