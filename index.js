@@ -727,6 +727,88 @@ async function getNFTSalesPage(collection, options = {}) {
   };
 }
 
+async function pollSalesOnce() {
+  const salesConfig = config?.sales;
+  if (!salesConfig || salesConfig.enabled !== true) {
+    console.log("[sales] poll skipped: sales disabled or not configured");
+    return;
+  }
+
+  const collections = Array.isArray(salesConfig.collections) ? salesConfig.collections : [];
+  if (collections.length === 0) {
+    console.log("[sales] poll skipped: no sales collections configured");
+    return;
+  }
+
+  const head = await provider.getBlockNumber();
+  const safeHead = head - CONFIRMATIONS;
+  if (safeHead <= 0) {
+    console.log(`[sales] poll skipped: safeHead=${safeHead}`);
+    return;
+  }
+
+  for (const collection of collections) {
+    const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
+    const collectionKey = safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
+    const currentState = loadSalesState(collectionKey);
+    const fromBlock = Number(currentState.lastProcessedBlock || 0) + 1;
+
+    console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} safeHead=${safeHead}`);
+
+    if (fromBlock > safeHead) {
+      console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${currentState.lastProcessedBlock} reason=no-new-blocks`);
+      continue;
+    }
+
+    const nextState = {
+      version: currentState.version,
+      lastProcessedBlock: currentState.lastProcessedBlock,
+      processed: { ...(currentState.processed || {}) },
+    };
+
+    try {
+      const page = await getNFTSalesPage(collection, {
+        fromBlock,
+        toBlock: safeHead,
+        order: "asc",
+        limit: 1000,
+      });
+
+      const normalizedSales = Array.isArray(page.sales) ? page.sales : [];
+      let newSalesCount = 0;
+
+      for (const sale of normalizedSales) {
+        const key = saleKeyFromRecord(sale);
+        if (nextState.processed[key]) continue;
+        nextState.processed[key] = true;
+        newSalesCount += 1;
+      }
+
+      console.log(
+        `[sales] collection=${collectionName} normalizedSales=${normalizedSales.length} newSales=${newSalesCount} pageKey=${page.pageKey ? "present" : "absent"}`
+      );
+
+      if (page.pageKey) {
+        console.log(
+          `[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${currentState.lastProcessedBlock} reason=pageKey-present`
+        );
+      } else {
+        nextState.lastProcessedBlock = safeHead;
+        console.log(
+          `[sales] cursor advance collection=${collectionName} from=${currentState.lastProcessedBlock} to=${nextState.lastProcessedBlock}`
+        );
+      }
+
+      saveSalesState(collectionKey, nextState);
+    } catch (e) {
+      console.error(
+        `[sales] poll failed collection=${collectionName} fromBlock=${fromBlock} safeHead=${safeHead}:`,
+        e?.message || e
+      );
+    }
+  }
+}
+
 // =========================
 // Discord client + rate limit
 // =========================
