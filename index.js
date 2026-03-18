@@ -695,6 +695,8 @@ async function getNFTSalesPage(collection, options = {}) {
   if (!contractAddress) {
     throw new Error("collection.contractAddress is required.");
   }
+  const isCanaryIssuesCollection =
+    contractAddress === "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f";
 
   const fromBlock = safeString(options.fromBlock || "0");
   const toBlock = safeString(options.toBlock || "latest");
@@ -716,7 +718,13 @@ async function getNFTSalesPage(collection, options = {}) {
 
   let res;
   try {
+    if (isCanaryIssuesCollection) {
+      console.log(`[sales:http] url=${url.toString()}`);
+    }
     res = await fetch(url, { signal: controller.signal });
+    if (isCanaryIssuesCollection) {
+      console.log(`[sales:http] status=${res.status} statusText=${res.statusText} ok=${res.ok}`);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
@@ -727,8 +735,6 @@ async function getNFTSalesPage(collection, options = {}) {
 
   const data = await res.json();
   const nftSales = Array.isArray(data?.nftSales) ? data.nftSales : [];
-  const isCanaryIssuesCollection =
-    contractAddress === "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f";
 
   if (isCanaryIssuesCollection) {
     console.log(
