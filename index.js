@@ -23,6 +23,80 @@ function isNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
 }
 
+function disabledSalesConfig() {
+  return {
+    enabled: false,
+    discordChannelId: "",
+    collections: [],
+  };
+}
+
+function validateOptionalSalesConfig(cfg) {
+  if (cfg?.sales === undefined) return;
+
+  const errors = [];
+  const sales = cfg.sales;
+
+  if (!sales || typeof sales !== "object" || Array.isArray(sales)) {
+    errors.push("sales must be a JSON object.");
+  } else {
+    if (typeof sales.enabled !== "boolean") {
+      errors.push("sales.enabled is required and must be a boolean.");
+    }
+
+    if (!isNonEmptyString(sales.discordChannelId)) {
+      errors.push("sales.discordChannelId is required and must be a non-empty string.");
+    }
+
+    if (!Array.isArray(sales.collections)) {
+      errors.push("sales.collections is required and must be an array.");
+    } else {
+      sales.collections.forEach((collection, i) => {
+        const where = `sales.collections[${i}]`;
+
+        if (!collection || typeof collection !== "object" || Array.isArray(collection)) {
+          errors.push(`${where} must be an object.`);
+          return;
+        }
+
+        if (!isNonEmptyString(collection.name)) {
+          errors.push(`${where}.name is required and must be a non-empty string.`);
+        }
+        if (!isNonEmptyString(collection.artist)) {
+          errors.push(`${where}.artist is required and must be a non-empty string.`);
+        }
+        if (!isNonEmptyString(collection.contractAddress)) {
+          errors.push(`${where}.contractAddress is required and must be a non-empty string.`);
+        }
+        if (!isNonEmptyString(collection.standard)) {
+          errors.push(`${where}.standard is required and must be a non-empty string.`);
+        } else {
+          const s = collection.standard.toLowerCase();
+          if (s !== "erc721" && s !== "erc1155") {
+            errors.push(`${where}.standard must be "erc721" or "erc1155".`);
+          }
+        }
+      });
+    }
+  }
+
+  if (errors.length > 0) {
+    console.error("⚠️ Invalid sales config. Sales tracking will be disabled:");
+    for (const err of errors) console.error(` - ${err}`);
+    cfg.sales = disabledSalesConfig();
+    return;
+  }
+
+  cfg.sales = {
+    ...sales,
+    discordChannelId: sales.discordChannelId.trim(),
+    collections: sales.collections.map((collection) => ({
+      ...collection,
+      standard: collection.standard.toLowerCase(),
+    })),
+  };
+}
+
 function validateConfig(cfg) {
   const errors = [];
 
@@ -91,6 +165,8 @@ function validateConfig(cfg) {
     for (const err of errors) console.error(` - ${err}`);
     process.exit(1);
   }
+
+  validateOptionalSalesConfig(cfg);
 }
 
 validateConfig(config);
