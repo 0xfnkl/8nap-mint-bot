@@ -567,7 +567,7 @@ function alchemyNftApiBaseUrlFromRpcUrl(rpcUrl) {
     throw new Error("RPC_HTTP_URL is not an Alchemy v2 endpoint.");
   }
 
-  return `${parsed.origin}/nft/v2/${parts[1]}`;
+  return `${parsed.origin}/nft/v3/${parts[1]}`;
 }
 
 function safeLowercaseAddress(value) {
