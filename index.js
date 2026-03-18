@@ -752,8 +752,9 @@ async function pollSalesOnce() {
     const collectionKey = safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
     const currentState = loadSalesState(collectionKey);
     const fromBlock = Number(currentState.lastProcessedBlock || 0) + 1;
+    const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);
 
-    console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} safeHead=${safeHead}`);
+    console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}`);
 
     if (fromBlock > safeHead) {
       console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${currentState.lastProcessedBlock} reason=no-new-blocks`);
@@ -769,7 +770,7 @@ async function pollSalesOnce() {
     try {
       const page = await getNFTSalesPage(collection, {
         fromBlock,
-        toBlock: safeHead,
+        toBlock,
         order: "asc",
         limit: 1000,
       });
@@ -793,7 +794,7 @@ async function pollSalesOnce() {
           `[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${currentState.lastProcessedBlock} reason=pageKey-present`
         );
       } else {
-        nextState.lastProcessedBlock = safeHead;
+        nextState.lastProcessedBlock = toBlock;
         console.log(
           `[sales] cursor advance collection=${collectionName} from=${currentState.lastProcessedBlock} to=${nextState.lastProcessedBlock}`
         );
@@ -802,7 +803,7 @@ async function pollSalesOnce() {
       saveSalesState(collectionKey, nextState);
     } catch (e) {
       console.error(
-        `[sales] poll failed collection=${collectionName} fromBlock=${fromBlock} safeHead=${safeHead}:`,
+        `[sales] poll failed collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}:`,
         e?.message || e
       );
     }
