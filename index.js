@@ -690,6 +690,21 @@ function saleKeyFromRecord(sale) {
   ].join(":");
 }
 
+const ISSUES_SALES_CANARY_CONTRACT = "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f";
+const ISSUES_SALES_CANARY_TX_HASH = "0xfe6efa324c92617800e3abca4ee90ad716a71e03a9553318c6c2614c1622660c";
+const ISSUES_SALES_CANARY_BLOCK = 24679719;
+const ISSUES_SALES_CANARY_RANGE_START = 24679710;
+const KNOWN_SEAPORT_ADDRESSES = new Set([
+  "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",
+  "0x00000000006c3852cbef3e08e8df289169ede581",
+  "0x0000000000000068f116a894984e2db1123eb395",
+]);
+const KNOWN_MARKETPLACE_MATCHERS = [
+  { address: "0x00000000000000adc04c56bf30ac9d3c0aaf14dc", matchedBy: "seaport" },
+  { address: "0x00000000006c3852cbef3e08e8df289169ede581", matchedBy: "seaport" },
+  { address: "0x0000000000000068f116a894984e2db1123eb395", matchedBy: "seaport" },
+];
+
 async function getNFTSalesPage(collection, options = {}) {
   const contractAddress = safeLowercaseAddress(collection?.contractAddress);
   if (!contractAddress) {
@@ -770,6 +785,159 @@ async function getNFTSalesPage(collection, options = {}) {
       blockTimestamp: safeString(data?.validAt?.blockTimestamp).trim(),
     },
   };
+}
+
+async function inspectIssuesSalesCanaryTransaction(txHash = ISSUES_SALES_CANARY_TX_HASH) {
+  console.log(`[sales:onchain] tx=${txHash} inspect-start contract=${ISSUES_SALES_CANARY_CONTRACT}`);
+
+  const receipt = await provider.getTransactionReceipt(txHash);
+  if (!receipt) {
+    console.log(`[sales:onchain] tx=${txHash} receipt not found`);
+    return;
+  }
+
+  const receiptLogs = Array.isArray(receipt.logs) ? receipt.logs : [];
+  console.log(
+    `[sales:onchain] tx=${txHash} receipt blockNumber=${safeString(receipt.blockNumber).trim()} logCount=${receiptLogs.length}`
+  );
+
+  const issueTransferEvents = [];
+  const contractSeen = new Set();
+
+  for (const log of receiptLogs) {
+    const logAddress = safeLowercaseAddress(log?.address);
+    if (logAddress && logAddress !== ISSUES_SALES_CANARY_CONTRACT) {
+      contractSeen.add(logAddress);
+    }
+
+    if (logAddress !== ISSUES_SALES_CANARY_CONTRACT) continue;
+    if (safeLowercaseString(log?.topics?.[0]) !== ERC721_TRANSFER_TOPIC.toLowerCase()) continue;
+
+    try {
+      const parsed = ERC721_TRANSFER_IFACE.parseLog(log);
+      if (parsed?.name !== "Transfer") continue;
+
+      issueTransferEvents.push({
+        from: safeLowercaseAddress(parsed.args.from),
+        to: safeLowercaseAddress(parsed.args.to),
+        tokenId: safeString(parsed.args.tokenId).trim(),
+        logIndex: safeString(log.logIndex ?? log.index).trim(),
+      });
+    } catch {}
+  }
+
+  console.log(`[sales:onchain] tx=${txHash} issuesTransferCount=${issueTransferEvents.length}`);
+  for (const transferEvent of issueTransferEvents) {
+    console.log(
+      `[sales:onchain] transfer tokenId=${transferEvent.tokenId} from=${transferEvent.from} to=${transferEvent.to} logIndex=${transferEvent.logIndex}`
+    );
+  }
+
+  for (const address of contractSeen) {
+    console.log(`[sales:onchain] contractSeen=${address}`);
+  }
+
+  const seaportAddress = [...contractSeen].find((address) => KNOWN_SEAPORT_ADDRESSES.has(address));
+  if (seaportAddress) {
+    console.log(`[sales:onchain] seaportStyleHint=possible address=${seaportAddress}`);
+  }
+}
+
+async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
+  const boundedFromBlock = Math.max(0, Number(fromBlock) || 0);
+  const boundedToBlock = Math.max(boundedFromBlock, Number(toBlock) || boundedFromBlock);
+
+  console.log(`[sales:onchain] range fromBlock=${boundedFromBlock} toBlock=${boundedToBlock}`);
+
+  const transferLogs = await provider.getLogs({
+    address: ISSUES_SALES_CANARY_CONTRACT,
+    fromBlock: boundedFromBlock,
+    toBlock: boundedToBlock,
+    topics: [[ERC721_TRANSFER_TOPIC]],
+  });
+
+  const groupedTransfers = new Map();
+
+  for (const log of transferLogs) {
+    try {
+      const parsed = ERC721_TRANSFER_IFACE.parseLog(log);
+      if (parsed?.name !== "Transfer") continue;
+
+      const from = safeLowercaseAddress(parsed.args.from);
+      if (from === ZERO_ADDRESS_LOWER) continue;
+
+      const txHash = safeLowercaseString(log.transactionHash);
+      if (!txHash) continue;
+
+      const existing = groupedTransfers.get(txHash) || {
+        transactionHash: txHash,
+        blockNumber: Number(log.blockNumber || 0),
+        tokenIds: [],
+        fromAddresses: [],
+        toAddresses: [],
+        transferCount: 0,
+      };
+
+      existing.transferCount += 1;
+      existing.tokenIds.push(safeString(parsed.args.tokenId).trim());
+      existing.fromAddresses.push(from);
+      existing.toAddresses.push(safeLowercaseAddress(parsed.args.to));
+      if (!existing.blockNumber && Number(log.blockNumber || 0) > 0) {
+        existing.blockNumber = Number(log.blockNumber || 0);
+      }
+
+      groupedTransfers.set(txHash, existing);
+    } catch {}
+  }
+
+  const candidates = [];
+
+  for (const groupedTransfer of groupedTransfers.values()) {
+    const receipt = await provider.getTransactionReceipt(groupedTransfer.transactionHash);
+    if (!receipt) continue;
+
+    const receiptAddresses = new Set(
+      (Array.isArray(receipt.logs) ? receipt.logs : [])
+        .map((log) => safeLowercaseAddress(log?.address))
+        .filter(Boolean)
+    );
+
+    let marketplaceAddressMatched = "";
+    let matchedBy = "";
+
+    for (const matcher of KNOWN_MARKETPLACE_MATCHERS) {
+      if (receiptAddresses.has(matcher.address)) {
+        marketplaceAddressMatched = matcher.address;
+        matchedBy = matcher.matchedBy;
+        break;
+      }
+    }
+
+    if (!marketplaceAddressMatched) continue;
+
+    const candidate = {
+      transactionHash: groupedTransfer.transactionHash,
+      blockNumber: safeString(groupedTransfer.blockNumber).trim(),
+      tokenIds: [...new Set(groupedTransfer.tokenIds)],
+      fromAddresses: [...new Set(groupedTransfer.fromAddresses)],
+      toAddresses: [...new Set(groupedTransfer.toAddresses)],
+      marketplaceAddressMatched,
+      matchedBy,
+      transferCount: groupedTransfer.transferCount,
+    };
+
+    candidates.push(candidate);
+
+    console.log(
+      `[sales:onchain] candidate matched tx=${candidate.transactionHash} marketplace=${candidate.marketplaceAddressMatched} matchedBy=${candidate.matchedBy}`
+    );
+    console.log(
+      `[sales:onchain] candidate tx=${candidate.transactionHash} block=${candidate.blockNumber} transferCount=${candidate.transferCount} tokenIds=${candidate.tokenIds.join("|")}`
+    );
+  }
+
+  console.log(`[sales:onchain] candidate count=${candidates.length}`);
+  return candidates;
 }
 
 async function pollSalesOnce() {
@@ -2690,6 +2858,21 @@ client.once("clientReady", async () => {
             }
           }
           console.log(`[sales] manual sales catch-up completed iterations=${iterations}`);
+          try {
+            await findIssuesOnchainSaleCandidatesInRange(
+              ISSUES_SALES_CANARY_RANGE_START,
+              ISSUES_SALES_CANARY_BLOCK
+            );
+          } catch (e) {
+            console.error("[sales:onchain] candidate scan failed:", e?.message || e);
+            console.error(e);
+          }
+          try {
+            await inspectIssuesSalesCanaryTransaction();
+          } catch (e) {
+            console.error("[sales:onchain] inspection failed:", e?.message || e);
+            console.error(e);
+          }
         })()
           .catch((e) => {
             console.error("[sales] manual sales catch-up failed:", e?.message || e);
