@@ -1,6 +1,18 @@
 {
   "discordChannelId": "1445238979937964154",
   "auctionChannelId": "1445850576255451367",
+  "sales": {
+    "enabled": true,
+    "discordChannelId": "1432785617657401528",
+    "collections": [
+      {
+        "name": "Issues",
+        "artist": "DeltaSauce",
+        "standard": "erc721",
+        "contractAddress": "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f"
+      }
+    ]
+  },
   "collections": [
     {
       "name": "8NAP Art Cards",
