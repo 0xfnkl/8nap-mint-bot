@@ -705,6 +705,10 @@ const KNOWN_MARKETPLACE_MATCHERS = [
   { address: "0x0000000000000068f116a894984e2db1123eb395", matchedBy: "seaport" },
 ];
 
+function isIssuesSalesCollection(collection) {
+  return safeLowercaseAddress(collection?.contractAddress) === ISSUES_SALES_CANARY_CONTRACT;
+}
+
 async function getNFTSalesPage(collection, options = {}) {
   const contractAddress = safeLowercaseAddress(collection?.contractAddress);
   if (!contractAddress) {
@@ -843,6 +847,35 @@ async function inspectIssuesSalesCanaryTransaction(txHash = ISSUES_SALES_CANARY_
   }
 }
 
+function normalizeIssuesOnchainCandidateToSales(candidate, collection) {
+  const transfers = Array.isArray(candidate?.transfers) ? candidate.transfers : [];
+  const contract = safeLowercaseAddress(collection?.contractAddress);
+  const normalizedSales = transfers.map((transfer) => ({
+    projectKey: contract,
+    collection: safeString(collection?.name).trim(),
+    standard: safeString(collection?.standard).trim().toLowerCase(),
+    quantity: "1",
+    sellerWallet: safeLowercaseAddress(transfer?.from),
+    buyerWallet: safeLowercaseAddress(transfer?.to),
+    salePriceNative: "",
+    currencySymbol: "",
+    marketplace: safeString(candidate?.matchedBy || candidate?.marketplaceAddressMatched).trim().toLowerCase(),
+    tokenId: safeString(transfer?.tokenId).trim(),
+    contract,
+    txHash: safeLowercaseString(candidate?.transactionHash),
+    blockNumber: safeString(candidate?.blockNumber).trim(),
+    logIndex: safeString(transfer?.logIndex).trim(),
+  }));
+
+  if (normalizedSales.length > 0) {
+    console.log(
+      `[sales:onchain] fallback normalized tx=${safeLowercaseString(candidate?.transactionHash)} rows=${normalizedSales.length} salePriceNative=missing currencySymbol=missing reason=price-decoding-not-implemented`
+    );
+  }
+
+  return normalizedSales;
+}
+
 async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
   const boundedFromBlock = Math.max(0, Number(fromBlock) || 0);
   const boundedToBlock = Math.max(boundedFromBlock, Number(toBlock) || boundedFromBlock);
@@ -875,13 +908,23 @@ async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
         tokenIds: [],
         fromAddresses: [],
         toAddresses: [],
+        transfers: [],
         transferCount: 0,
       };
 
       existing.transferCount += 1;
-      existing.tokenIds.push(safeString(parsed.args.tokenId).trim());
+      const tokenId = safeString(parsed.args.tokenId).trim();
+      const to = safeLowercaseAddress(parsed.args.to);
+      const logIndex = safeString(log.logIndex ?? log.index).trim();
+      existing.tokenIds.push(tokenId);
       existing.fromAddresses.push(from);
-      existing.toAddresses.push(safeLowercaseAddress(parsed.args.to));
+      existing.toAddresses.push(to);
+      existing.transfers.push({
+        tokenId,
+        from,
+        to,
+        logIndex,
+      });
       if (!existing.blockNumber && Number(log.blockNumber || 0) > 0) {
         existing.blockNumber = Number(log.blockNumber || 0);
       }
@@ -921,6 +964,7 @@ async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
       tokenIds: [...new Set(groupedTransfer.tokenIds)],
       fromAddresses: [...new Set(groupedTransfer.fromAddresses)],
       toAddresses: [...new Set(groupedTransfer.toAddresses)],
+      transfers: groupedTransfer.transfers.map((transfer) => ({ ...transfer })),
       marketplaceAddressMatched,
       matchedBy,
       transferCount: groupedTransfer.transferCount,
@@ -998,7 +1042,16 @@ async function pollSalesOnce() {
         limit: 1000,
       });
 
-      const normalizedSales = Array.isArray(page.sales) ? page.sales : [];
+      let normalizedSales = Array.isArray(page.sales) ? page.sales : [];
+      if (normalizedSales.length === 0 && isIssuesSalesCollection(collection)) {
+        const onchainCandidates = await findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock);
+        normalizedSales = onchainCandidates.flatMap((candidate) =>
+          normalizeIssuesOnchainCandidateToSales(candidate, collection)
+        );
+        console.log(
+          `[sales:onchain] fallback collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
+        );
+      }
       let newSalesCount = 0;
 
       for (const sale of normalizedSales) {
