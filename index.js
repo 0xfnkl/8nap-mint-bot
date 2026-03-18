@@ -876,6 +876,54 @@ function normalizeIssuesOnchainCandidateToSales(candidate, collection) {
   return normalizedSales;
 }
 
+async function postSale(collection, sale) {
+  const tokenId = safeString(sale?.tokenId).trim() || "unknown";
+  const sellerWallet = safeLowercaseAddress(sale?.sellerWallet);
+  const buyerWallet = safeLowercaseAddress(sale?.buyerWallet);
+  const marketplace = safeString(sale?.marketplace).trim() || "unknown";
+  const txHash = safeLowercaseString(sale?.txHash);
+  const contract = safeLowercaseAddress(sale?.contract || collection?.contractAddress);
+  const blockNumberText = safeString(sale?.blockNumber).trim();
+
+  const sellerDisplay = sellerWallet ? await formatDisplayAddress(sellerWallet) : "unknown";
+  const buyerDisplay = buyerWallet ? await formatDisplayAddress(buyerWallet) : "unknown";
+
+  let priceLine = "Price: **Unavailable**";
+  if (isNonEmptyString(sale?.salePriceNative)) {
+    const symbol = isNonEmptyString(sale?.currencySymbol) ? ` ${safeString(sale.currencySymbol).trim()}` : "";
+    priceLine = `Price: **${safeString(sale.salePriceNative).trim()}${symbol}**`;
+  }
+
+  let timestampMs = Date.now();
+  const blockNumber = Number(blockNumberText);
+  if (Number.isFinite(blockNumber) && blockNumber > 0) {
+    try {
+      const block = await provider.getBlock(blockNumber);
+      if (block?.timestamp) timestampMs = block.timestamp * 1000;
+    } catch {}
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${collection.name} Secondary Sale #${tokenId}`)
+    .setDescription(
+      [
+        `Collection: **${safeString(collection?.name).trim()}**`,
+        `Seller: **${sellerDisplay}**`,
+        `Buyer: **${buyerDisplay}**`,
+        `Marketplace: **${marketplace}**`,
+        priceLine,
+        ``,
+        `[View on OpenSea](${openseaUrl(contract, tokenId)})`,
+        txHash ? `Tx: https://etherscan.io/tx/${txHash}` : null,
+      ].filter(Boolean).join("\n")
+    )
+    .setTimestamp(new Date(timestampMs))
+    .setFooter({ text: safeString(collection?.name).trim() || "Sales" });
+
+  const channel = await client.channels.fetch(config.sales.discordChannelId);
+  await rateLimiter.send(channel, { embeds: [embed] });
+}
+
 async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
   const boundedFromBlock = Math.max(0, Number(fromBlock) || 0);
   const boundedToBlock = Math.max(boundedFromBlock, Number(toBlock) || boundedFromBlock);
@@ -1057,6 +1105,9 @@ async function pollSalesOnce() {
       for (const sale of normalizedSales) {
         const key = saleKeyFromRecord(sale);
         if (nextState.processed[key]) continue;
+        if (isIssuesSalesCollection(collection)) {
+          await postSale(collection, sale);
+        }
         nextState.processed[key] = true;
         newSalesCount += 1;
       }
