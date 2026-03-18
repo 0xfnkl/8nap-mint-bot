@@ -2595,6 +2595,21 @@ client.once("clientReady", async () => {
     await startPolling();
     console.log("[startup] startPolling() completed");
 
+    if (process.env.SALES_MANUAL_POLL_ON_READY === "1") {
+      console.log("[sales] manual sales poll scheduled delayMs=15000");
+      setTimeout(() => {
+        console.log("[sales] manual sales poll start");
+        pollSalesOnce()
+          .then(() => {
+            console.log("[sales] manual sales poll completed");
+          })
+          .catch((e) => {
+            console.error("[sales] manual sales poll failed:", e?.message || e);
+            console.error(e);
+          });
+      }, 15000);
+    }
+
     // Start monthly poster (runs shortly after boot, then every 5 minutes)
     setTimeout(() => {
       runMonthlyLedgerPosterTick().catch((e) => {
