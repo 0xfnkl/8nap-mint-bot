@@ -731,21 +731,23 @@ async function pollSalesOnce() {
   const salesConfig = config?.sales;
   if (!salesConfig || salesConfig.enabled !== true) {
     console.log("[sales] poll skipped: sales disabled or not configured");
-    return;
+    return { advancedAny: false };
   }
 
   const collections = Array.isArray(salesConfig.collections) ? salesConfig.collections : [];
   if (collections.length === 0) {
     console.log("[sales] poll skipped: no sales collections configured");
-    return;
+    return { advancedAny: false };
   }
 
   const head = await provider.getBlockNumber();
   const safeHead = head - CONFIRMATIONS;
   if (safeHead <= 0) {
     console.log(`[sales] poll skipped: safeHead=${safeHead}`);
-    return;
+    return { advancedAny: false };
   }
+
+  let advancedAny = false;
 
   for (const collection of collections) {
     const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
@@ -795,6 +797,7 @@ async function pollSalesOnce() {
         );
       } else {
         nextState.lastProcessedBlock = toBlock;
+        advancedAny = true;
         console.log(
           `[sales] cursor advance collection=${collectionName} from=${currentState.lastProcessedBlock} to=${nextState.lastProcessedBlock}`
         );
@@ -808,6 +811,8 @@ async function pollSalesOnce() {
       );
     }
   }
+
+  return { advancedAny };
 }
 
 // =========================
@@ -2615,15 +2620,26 @@ client.once("clientReady", async () => {
     }
 
     if (process.env.SALES_MANUAL_POLL_ON_READY === "1") {
-      console.log("[sales] manual sales poll scheduled delayMs=15000");
+      console.log("[sales] manual sales catch-up scheduled delayMs=15000");
       setTimeout(() => {
-        console.log("[sales] manual sales poll start");
-        pollSalesOnce()
-          .then(() => {
-            console.log("[sales] manual sales poll completed");
-          })
+        const maxIterations = 100;
+        console.log("[sales] manual sales catch-up start");
+        (async () => {
+          let iterations = 0;
+          for (; iterations < maxIterations; iterations++) {
+            const iterationNumber = iterations + 1;
+            console.log(`[sales] manual sales catch-up iteration ${iterationNumber}`);
+            const result = await pollSalesOnce();
+            if (!result?.advancedAny) {
+              console.log("[sales] manual sales catch-up stop reason=no-cursor-advance");
+              iterations = iterationNumber;
+              break;
+            }
+          }
+          console.log(`[sales] manual sales catch-up completed iterations=${iterations}`);
+        })()
           .catch((e) => {
-            console.error("[sales] manual sales poll failed:", e?.message || e);
+            console.error("[sales] manual sales catch-up failed:", e?.message || e);
             console.error(e);
           });
       }, 15000);
