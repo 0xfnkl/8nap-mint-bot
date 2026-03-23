@@ -709,6 +709,8 @@ function isIssuesSalesCollection(collection) {
   return safeLowercaseAddress(collection?.contractAddress) === ISSUES_SALES_CANARY_CONTRACT;
 }
 
+const mintPollingCollections = config.collections.filter((collection) => !isIssuesSalesCollection(collection));
+
 async function getNFTSalesPage(collection, options = {}) {
   const contractAddress = safeLowercaseAddress(collection?.contractAddress);
   if (!contractAddress) {
@@ -2281,7 +2283,7 @@ async function pollOnce() {
   const safeHead = head - CONFIRMATIONS;
   if (safeHead <= 0) return;
 
-  for (const collection of config.collections) {
+  for (const collection of mintPollingCollections) {
     if (!collection.contractAddress || !collection.standard) continue;
 
     const addr = collection.contractAddress;
@@ -2823,7 +2825,7 @@ let pollInFlight = false;
 async function startPolling() {
   console.log("[startup:startPolling] entering startPolling()");
   // initialize cursors to safe head on first boot, to avoid posting historical spam
-  for (const collection of config.collections) {
+  for (const collection of mintPollingCollections) {
     console.log(`[startup:startPolling] before initializeStateToHeadIfEmpty collection=${collection.name}`);
     await initializeStateToHeadIfEmpty(collection);
     console.log(`[startup:startPolling] after initializeStateToHeadIfEmpty collection=${collection.name}`);
