@@ -2934,6 +2934,8 @@ async function registerCommands() {
 
 let pollTimer = null;
 let pollInFlight = false;
+let salesPollTimer = null;
+let salesPollInFlight = false;
 
 async function startPolling() {
   console.log("[startup:startPolling] entering startPolling()");
@@ -2954,6 +2956,13 @@ async function startPolling() {
 });
   console.log("[startup:startPolling] after first immediate pollOnce() finishes");
 
+  console.log("[startup:startPolling] before first immediate pollSalesOnce()");
+  await pollSalesOnce().catch((e) => {
+    console.error("pollSalesOnce error:", e.message);
+    console.error(e);
+  });
+  console.log("[startup:startPolling] after first immediate pollSalesOnce() finishes");
+
 pollTimer = setInterval(() => {
   if (pollInFlight) {
     console.log("[poll] skipped: previous poll still running");
@@ -2969,6 +2978,22 @@ pollTimer = setInterval(() => {
   });
 }, POLL_MS);
   console.log("[startup:startPolling] recurring poll interval started");
+
+  salesPollTimer = setInterval(() => {
+    if (salesPollInFlight) {
+      console.log("[sales] poll skipped: previous sales poll still running");
+      return;
+    }
+
+    salesPollInFlight = true;
+    pollSalesOnce().catch((e) => {
+      console.error("pollSalesOnce error:", e.message);
+      console.error(e);
+    }).finally(() => {
+      salesPollInFlight = false;
+    });
+  }, POLL_MS);
+  console.log("[startup:startPolling] recurring sales poll interval started");
 }
 
 // Heartbeat
@@ -2992,6 +3017,7 @@ setInterval(async () => {
 async function shutdown(signal) {
   console.log(`🛑 Shutting down (${signal})...`);
   if (pollTimer) clearInterval(pollTimer);
+  if (salesPollTimer) clearInterval(salesPollTimer);
   process.exit(0);
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
