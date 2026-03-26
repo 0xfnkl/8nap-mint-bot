@@ -2378,6 +2378,35 @@ async function initializeStateToHeadIfEmpty(collection) {
   }
 }
 
+async function initializeSalesStateNearHead(collection) {
+  const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
+  const collectionKey = safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
+  const st = loadSalesState(collectionKey);
+  const head = await provider.getBlockNumber();
+  const safeHead = head - CONFIRMATIONS;
+  if (safeHead <= 0) return;
+
+  const targetLastProcessedBlock = Math.max(0, safeHead - MAX_BLOCK_RANGE);
+  const currentLastProcessedBlock = Number(st.lastProcessedBlock || 0);
+
+  if (!currentLastProcessedBlock || currentLastProcessedBlock === 0) {
+    st.lastProcessedBlock = targetLastProcessedBlock;
+    saveSalesState(collectionKey, st);
+    console.log(
+      `[sales] cursor initialized near head collection=${collectionName} lastProcessedBlock=${st.lastProcessedBlock} safeHead=${safeHead} bufferBlocks=${MAX_BLOCK_RANGE}`
+    );
+    return;
+  }
+
+  if (currentLastProcessedBlock < targetLastProcessedBlock) {
+    st.lastProcessedBlock = targetLastProcessedBlock;
+    saveSalesState(collectionKey, st);
+    console.log(
+      `[sales] cursor fast-forwarded near head collection=${collectionName} from=${currentLastProcessedBlock} to=${st.lastProcessedBlock} safeHead=${safeHead} bufferBlocks=${MAX_BLOCK_RANGE}`
+    );
+  }
+}
+
 function tokenIdFromTotalSupply(totalSupplyValue, tokenIdBase = 0) {
   // tokenIdBase:
   // 0 = tokenId is totalSupply - 1 (0-based collections)
@@ -2944,6 +2973,15 @@ async function startPolling() {
     console.log(`[startup:startPolling] before initializeStateToHeadIfEmpty collection=${collection.name}`);
     await initializeStateToHeadIfEmpty(collection);
     console.log(`[startup:startPolling] after initializeStateToHeadIfEmpty collection=${collection.name}`);
+  }
+
+  const salesCollections = Array.isArray(config?.sales?.collections) ? config.sales.collections : [];
+  if (config?.sales?.enabled === true) {
+    for (const collection of salesCollections) {
+      console.log(`[startup:startPolling] before initializeSalesStateNearHead collection=${collection.name}`);
+      await initializeSalesStateNearHead(collection);
+      console.log(`[startup:startPolling] after initializeSalesStateNearHead collection=${collection.name}`);
+    }
   }
 
   console.log(`✅ Polling started. interval=${POLL_MS}ms confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
