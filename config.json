@@ -11,6 +11,12 @@
         "standard": "erc721",
         "contractAddress": "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f",
         "startBlock": 24679000
+      },
+      {
+        "name": "Metamorphosis",
+        "artist": "RedruM",
+        "standard": "erc721",
+        "contractAddress": "0xd27ca58bc4f70e95a7f193965ae60ffce0d46a87"
       }
     ]
   },
