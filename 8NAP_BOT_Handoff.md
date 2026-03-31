@@ -23,10 +23,21 @@ Redeploy trigger after Railway initialization stall.
 - `config.json`             Discord channel IDs + collections list
 - `package.json`            Dependencies, main file
 - `package-lock.json`       Locked dependency versions
+- `scripts/review-diff.sh`  Generates `current-diff.md` for external review
 - `.env`                    Local only (NOT committed)
 - `.github/copilot-instructions.md` (optional notes)
 
 Railway runs Node (Railpack/Nixpacks). No custom start command is set. Recommended: add `"start": "node index.js"`.
+
+---
+
+## Review diff workflow
+- Run `bash scripts/review-diff.sh` from repo root before external review or before finishing a Codex task.
+- Optional alias: `npm run review:diff`
+- This overwrites `current-diff.md` with the current uncommitted diff in Markdown format.
+- `current-diff.md` is gitignored and should not be committed.
+- Reusable Codex prompt snippet:
+  `Before finishing, run bash scripts/review-diff.sh and use current-diff.md as the reviewer handoff artifact.`
 
 ---
 
