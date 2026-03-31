@@ -691,15 +691,6 @@ function saleKeyFromRecord(sale) {
 }
 
 const ISSUES_SALES_CANARY_CONTRACT = "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f";
-const ISSUES_MISSED_SALE_TX_HASH = "0xbb260ce0c7d36e48733c60543efe46c6255d9409ac8d13d0777480eee575c2ce";
-const ISSUES_MISSED_SALE_BLOCK = 24740906;
-const ISSUES_MISSED_SALE_TOKEN_ID = "366";
-const ISSUES_MISSED_SALE_RANGE_START = 24740900;
-const KNOWN_SEAPORT_ADDRESSES = new Set([
-  "0x00000000000000adc04c56bf30ac9d3c0aaf14dc",
-  "0x00000000006c3852cbef3e08e8df289169ede581",
-  "0x0000000000000068f116a894984e2db1123eb395",
-]);
 const KNOWN_MARKETPLACE_MATCHERS = [
   { address: "0x00000000000000adc04c56bf30ac9d3c0aaf14dc", matchedBy: "seaport" },
   { address: "0x00000000006c3852cbef3e08e8df289169ede581", matchedBy: "seaport" },
@@ -710,33 +701,6 @@ function isIssuesSalesCollection(collection) {
   return safeLowercaseAddress(collection?.contractAddress) === ISSUES_SALES_CANARY_CONTRACT;
 }
 
-function isIssuesMissedSaleWindow(fromBlock, toBlock) {
-  const start = Math.max(0, Number(fromBlock) || 0);
-  const end = Math.max(start, Number(toBlock) || start);
-  return start <= ISSUES_MISSED_SALE_BLOCK && end >= ISSUES_MISSED_SALE_BLOCK;
-}
-
-function isIssuesMissedSaleRecord(record, contractFallback = "") {
-  return (
-    safeLowercaseAddress(record?.contractAddress || record?.contract || contractFallback) === ISSUES_SALES_CANARY_CONTRACT &&
-    safeLowercaseString(record?.transactionHash || record?.txHash) === ISSUES_MISSED_SALE_TX_HASH &&
-    safeString(record?.tokenId).trim() === ISSUES_MISSED_SALE_TOKEN_ID
-  );
-}
-
-function findIssuesMissedSaleMatches(records, contractFallback = "") {
-  return Array.isArray(records)
-    ? records.filter((record) => isIssuesMissedSaleRecord(record, contractFallback))
-    : [];
-}
-
-function describeIssuesMissedSaleKeys(sales) {
-  const matches = findIssuesMissedSaleMatches(sales);
-  return matches.length > 0
-    ? matches.map((sale) => saleKeyFromRecord(sale)).join("|")
-    : "none";
-}
-
 const mintPollingCollections = config.collections.filter((collection) => !isIssuesSalesCollection(collection));
 
 async function getNFTSalesPage(collection, options = {}) {
@@ -744,8 +708,6 @@ async function getNFTSalesPage(collection, options = {}) {
   if (!contractAddress) {
     throw new Error("collection.contractAddress is required.");
   }
-  const isCanaryIssuesCollection =
-    contractAddress === "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f";
 
   const fromBlock = safeString(options.fromBlock || "0");
   const toBlock = safeString(options.toBlock || "latest");
@@ -767,13 +729,7 @@ async function getNFTSalesPage(collection, options = {}) {
 
   let res;
   try {
-    if (isCanaryIssuesCollection) {
-      console.log(`[sales:http] url=${url.toString()}`);
-    }
     res = await fetch(url, { signal: controller.signal });
-    if (isCanaryIssuesCollection) {
-      console.log(`[sales:http] status=${res.status} statusText=${res.statusText} ok=${res.ok}`);
-    }
   } finally {
     clearTimeout(timeoutId);
   }
@@ -786,39 +742,6 @@ async function getNFTSalesPage(collection, options = {}) {
   const nftSales = Array.isArray(data?.nftSales) ? data.nftSales : [];
   const normalizedSales = nftSales.map((rawSale) => normalizeSaleRecord(rawSale, collection));
 
-  if (isCanaryIssuesCollection) {
-    console.log(
-      `[sales:raw] contractAddress=${contractAddress} fromBlock=${fromBlock} toBlock=${toBlock} order=${order} limit=${limit} nftSalesLength=${nftSales.length} pageKey=${isNonEmptyString(data?.pageKey) ? String(data.pageKey).trim() : ""} validAt=${JSON.stringify({
-        blockNumber: safeString(data?.validAt?.blockNumber).trim(),
-        blockHash: safeString(data?.validAt?.blockHash).trim().toLowerCase(),
-        blockTimestamp: safeString(data?.validAt?.blockTimestamp).trim(),
-      })}`
-    );
-
-    if (nftSales.length > 0) {
-      const firstRawSale = nftSales[0] || {};
-      console.log(
-        `[sales:raw] firstSale=${JSON.stringify({
-          marketplace: safeString(firstRawSale.marketplace).trim(),
-          contractAddress: safeLowercaseAddress(firstRawSale.contractAddress),
-          tokenId: safeString(firstRawSale.tokenId).trim(),
-          blockNumber: safeString(firstRawSale.blockNumber).trim(),
-          logIndex: safeString(firstRawSale.logIndex).trim(),
-          bundleIndex: safeString(firstRawSale.bundleIndex).trim(),
-          transactionHash: safeLowercaseString(firstRawSale.transactionHash),
-        })}`
-      );
-    }
-
-    if (isIssuesMissedSaleWindow(fromBlock, toBlock)) {
-      const targetRawMatches = findIssuesMissedSaleMatches(nftSales, contractAddress);
-      const targetNormalizedMatches = findIssuesMissedSaleMatches(normalizedSales);
-      console.log(
-        `[sales:diag] alchemy target-window tx=${ISSUES_MISSED_SALE_TX_HASH} block=${ISSUES_MISSED_SALE_BLOCK} fromBlock=${fromBlock} toBlock=${toBlock} nftSales=${nftSales.length} targetRawMatches=${targetRawMatches.length} targetNormalizedMatches=${targetNormalizedMatches.length} targetSaleKeys=${describeIssuesMissedSaleKeys(targetNormalizedMatches)}`
-      );
-    }
-  }
-
   return {
     sales: normalizedSales,
     pageKey: isNonEmptyString(data?.pageKey) ? String(data.pageKey).trim() : "",
@@ -828,70 +751,6 @@ async function getNFTSalesPage(collection, options = {}) {
       blockTimestamp: safeString(data?.validAt?.blockTimestamp).trim(),
     },
   };
-}
-
-async function inspectIssuesSalesCanaryTransaction(txHash = ISSUES_MISSED_SALE_TX_HASH) {
-  console.log(`[sales:onchain] tx=${txHash} inspect-start contract=${ISSUES_SALES_CANARY_CONTRACT}`);
-
-  const receipt = await provider.getTransactionReceipt(txHash);
-  if (!receipt) {
-    console.log(`[sales:onchain] tx=${txHash} receipt not found`);
-    return;
-  }
-
-  const receiptLogs = Array.isArray(receipt.logs) ? receipt.logs : [];
-  console.log(
-    `[sales:onchain] tx=${txHash} receipt blockNumber=${safeString(receipt.blockNumber).trim()} logCount=${receiptLogs.length}`
-  );
-
-  const issueTransferEvents = [];
-  const contractSeen = new Set();
-  const receiptAddresses = new Set();
-
-  for (const log of receiptLogs) {
-    const logAddress = safeLowercaseAddress(log?.address);
-    if (logAddress) receiptAddresses.add(logAddress);
-    if (logAddress && logAddress !== ISSUES_SALES_CANARY_CONTRACT) {
-      contractSeen.add(logAddress);
-    }
-
-    if (logAddress !== ISSUES_SALES_CANARY_CONTRACT) continue;
-    if (safeLowercaseString(log?.topics?.[0]) !== ERC721_TRANSFER_TOPIC.toLowerCase()) continue;
-
-    try {
-      const parsed = ERC721_TRANSFER_IFACE.parseLog(log);
-      if (parsed?.name !== "Transfer") continue;
-
-      issueTransferEvents.push({
-        from: safeLowercaseAddress(parsed.args.from),
-        to: safeLowercaseAddress(parsed.args.to),
-        tokenId: safeString(parsed.args.tokenId).trim(),
-        logIndex: safeString(log.logIndex ?? log.index).trim(),
-      });
-    } catch {}
-  }
-
-  console.log(`[sales:onchain] tx=${txHash} issuesTransferCount=${issueTransferEvents.length}`);
-  for (const transferEvent of issueTransferEvents) {
-    console.log(
-      `[sales:onchain] transfer tokenId=${transferEvent.tokenId} from=${transferEvent.from} to=${transferEvent.to} logIndex=${transferEvent.logIndex}`
-    );
-  }
-
-  const targetTransfers = issueTransferEvents.filter((transferEvent) => transferEvent.tokenId === ISSUES_MISSED_SALE_TOKEN_ID);
-  const matchedMarketplace = KNOWN_MARKETPLACE_MATCHERS.find((matcher) => receiptAddresses.has(matcher.address));
-  console.log(
-    `[sales:diag] receipt target-tx=${txHash} targetTokenId=${ISSUES_MISSED_SALE_TOKEN_ID} targetTransferSeen=${targetTransfers.length > 0 ? "yes" : "no"} targetTransferLogIndexes=${targetTransfers.map((transferEvent) => transferEvent.logIndex).join("|") || "none"} marketplaceMatched=${matchedMarketplace ? "yes" : "no"} matchedBy=${matchedMarketplace?.matchedBy || "none"} matchedAddress=${matchedMarketplace?.address || "none"}`
-  );
-
-  for (const address of contractSeen) {
-    console.log(`[sales:onchain] contractSeen=${address}`);
-  }
-
-  const seaportAddress = [...contractSeen].find((address) => KNOWN_SEAPORT_ADDRESSES.has(address));
-  if (seaportAddress) {
-    console.log(`[sales:onchain] seaportStyleHint=possible address=${seaportAddress}`);
-  }
 }
 
 function normalizeIssuesOnchainCandidateToSales(candidate, collection) {
@@ -917,13 +776,6 @@ function normalizeIssuesOnchainCandidateToSales(candidate, collection) {
   if (normalizedSales.length > 0) {
     console.log(
       `[sales:onchain] fallback normalized tx=${safeLowercaseString(candidate?.transactionHash)} rows=${normalizedSales.length} salePriceNative=missing currencySymbol=missing reason=price-decoding-not-implemented`
-    );
-  }
-
-  if (safeLowercaseString(candidate?.transactionHash) === ISSUES_MISSED_SALE_TX_HASH) {
-    const targetMatches = findIssuesMissedSaleMatches(normalizedSales);
-    console.log(
-      `[sales:diag] fallback normalized target-tx=${ISSUES_MISSED_SALE_TX_HASH} totalRows=${normalizedSales.length} targetRows=${targetMatches.length} targetSaleKeys=${describeIssuesMissedSaleKeys(targetMatches)}`
     );
   }
 
@@ -981,14 +833,8 @@ async function postSale(collection, sale) {
 async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
   const boundedFromBlock = Math.max(0, Number(fromBlock) || 0);
   const boundedToBlock = Math.max(boundedFromBlock, Number(toBlock) || boundedFromBlock);
-  const includesMissedSaleBlock = isIssuesMissedSaleWindow(boundedFromBlock, boundedToBlock);
 
   console.log(`[sales:onchain] range fromBlock=${boundedFromBlock} toBlock=${boundedToBlock}`);
-  if (includesMissedSaleBlock) {
-    console.log(
-      `[sales:diag] fallback target-window tx=${ISSUES_MISSED_SALE_TX_HASH} tokenId=${ISSUES_MISSED_SALE_TOKEN_ID} block=${ISSUES_MISSED_SALE_BLOCK} fromBlock=${boundedFromBlock} toBlock=${boundedToBlock}`
-    );
-  }
 
   const transferLogs = await provider.getLogs({
     address: ISSUES_SALES_CANARY_CONTRACT,
@@ -998,8 +844,6 @@ async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
   });
 
   const groupedTransfers = new Map();
-  let targetTransferSeenInRange = false;
-  const targetTransferLogIndexes = [];
 
   for (const log of transferLogs) {
     try {
@@ -1026,10 +870,6 @@ async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
       const tokenId = safeString(parsed.args.tokenId).trim();
       const to = safeLowercaseAddress(parsed.args.to);
       const logIndex = safeString(log.logIndex ?? log.index).trim();
-      if (txHash === ISSUES_MISSED_SALE_TX_HASH && tokenId === ISSUES_MISSED_SALE_TOKEN_ID) {
-        targetTransferSeenInRange = true;
-        targetTransferLogIndexes.push(logIndex);
-      }
       existing.tokenIds.push(tokenId);
       existing.fromAddresses.push(from);
       existing.toAddresses.push(to);
@@ -1045,12 +885,6 @@ async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
 
       groupedTransfers.set(txHash, existing);
     } catch {}
-  }
-
-  if (includesMissedSaleBlock || targetTransferSeenInRange) {
-    console.log(
-      `[sales:diag] fallback transfer-scan tx=${ISSUES_MISSED_SALE_TX_HASH} sawTargetTransfer=${targetTransferSeenInRange ? "yes" : "no"} targetTransferLogIndexes=${targetTransferLogIndexes.join("|") || "none"} groupedTxCount=${groupedTransfers.size}`
-    );
   }
 
   const candidates = [];
@@ -1074,12 +908,6 @@ async function findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock) {
         matchedBy = matcher.matchedBy;
         break;
       }
-    }
-
-    if (groupedTransfer.transactionHash === ISSUES_MISSED_SALE_TX_HASH) {
-      console.log(
-        `[sales:diag] fallback receipt-match tx=${groupedTransfer.transactionHash} marketplaceMatched=${marketplaceAddressMatched ? "yes" : "no"} matchedBy=${matchedBy || "none"} matchedAddress=${marketplaceAddressMatched || "none"} transferCount=${groupedTransfer.transferCount} tokenIds=${groupedTransfer.tokenIds.join("|") || "none"}`
-      );
     }
 
     if (!marketplaceAddressMatched) continue;
@@ -1147,14 +975,8 @@ async function pollSalesOnce() {
         : persistedLastProcessedBlock;
     const fromBlock = effectiveLastProcessedBlock + 1;
     const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);
-    const includesMissedSaleBlock = issuesCollection && isIssuesMissedSaleWindow(fromBlock, toBlock);
 
     console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}`);
-    if (issuesCollection) {
-      console.log(
-        `[sales:diag] poll target-window collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} targetBlock=${ISSUES_MISSED_SALE_BLOCK} containsTargetBlock=${includesMissedSaleBlock ? "yes" : "no"} lastProcessedBlock=${persistedLastProcessedBlock}`
-      );
-    }
 
     if (fromBlock > safeHead) {
       console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${persistedLastProcessedBlock} reason=no-new-blocks`);
@@ -1175,21 +997,7 @@ async function pollSalesOnce() {
         limit: 1000,
       });
 
-      if (includesMissedSaleBlock) {
-        try {
-          await inspectIssuesSalesCanaryTransaction(ISSUES_MISSED_SALE_TX_HASH);
-        } catch (diagError) {
-          console.error("[sales:diag] receipt inspection failed:", diagError?.message || diagError);
-        }
-      }
-
       let normalizedSales = Array.isArray(page.sales) ? page.sales : [];
-      if (includesMissedSaleBlock) {
-        const targetAlchemyMatches = findIssuesMissedSaleMatches(normalizedSales);
-        console.log(
-          `[sales:diag] alchemy decision tx=${ISSUES_MISSED_SALE_TX_HASH} collection=${collectionName} normalizedSales=${normalizedSales.length} targetMatches=${targetAlchemyMatches.length} fallbackWillRun=${normalizedSales.length === 0 ? "yes" : "no"} fallbackSuppressed=${normalizedSales.length > 0 ? "yes" : "no"} reason=${normalizedSales.length > 0 ? "alchemy-non-zero-window" : "alchemy-empty-window"} targetSaleKeys=${describeIssuesMissedSaleKeys(targetAlchemyMatches)}`
-        );
-      }
       if (normalizedSales.length === 0 && issuesCollection) {
         const onchainCandidates = await findIssuesOnchainSaleCandidatesInRange(fromBlock, toBlock);
         normalizedSales = onchainCandidates.flatMap((candidate) =>
@@ -1199,29 +1007,13 @@ async function pollSalesOnce() {
           `[sales:onchain] fallback collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
         );
       }
-      if (includesMissedSaleBlock) {
-        const targetSelectedMatches = findIssuesMissedSaleMatches(normalizedSales);
-        console.log(
-          `[sales:diag] selected sales tx=${ISSUES_MISSED_SALE_TX_HASH} collection=${collectionName} source=${page.sales.length > 0 ? "alchemy" : "fallback"} selectedNormalizedSales=${normalizedSales.length} targetMatches=${targetSelectedMatches.length} targetSaleKeys=${describeIssuesMissedSaleKeys(targetSelectedMatches)}`
-        );
-      }
       let newSalesCount = 0;
 
       for (const sale of normalizedSales) {
         const key = saleKeyFromRecord(sale);
-        if (isIssuesMissedSaleRecord(sale)) {
-          console.log(
-            `[sales:diag] target sale loop tx=${ISSUES_MISSED_SALE_TX_HASH} key=${key} alreadyProcessed=${nextState.processed[key] ? "yes" : "no"} willPost=${nextState.processed[key] ? "no" : "yes"}`
-          );
-        }
         if (nextState.processed[key]) continue;
         if (issuesCollection) {
           await postSale(collection, sale);
-        }
-        if (isIssuesMissedSaleRecord(sale)) {
-          console.log(
-            `[sales:diag] target sale posted tx=${ISSUES_MISSED_SALE_TX_HASH} key=${key} posted=${issuesCollection ? "yes" : "no"}`
-          );
         }
         nextState.processed[key] = true;
         newSalesCount += 1;
@@ -3141,21 +2933,6 @@ client.once("clientReady", async () => {
             }
           }
           console.log(`[sales] manual sales catch-up completed iterations=${iterations}`);
-          try {
-            await findIssuesOnchainSaleCandidatesInRange(
-              ISSUES_MISSED_SALE_RANGE_START,
-              ISSUES_MISSED_SALE_BLOCK
-            );
-          } catch (e) {
-            console.error("[sales:onchain] candidate scan failed:", e?.message || e);
-            console.error(e);
-          }
-          try {
-            await inspectIssuesSalesCanaryTransaction();
-          } catch (e) {
-            console.error("[sales:onchain] inspection failed:", e?.message || e);
-            console.error(e);
-          }
         })()
           .catch((e) => {
             console.error("[sales] manual sales catch-up failed:", e?.message || e);
