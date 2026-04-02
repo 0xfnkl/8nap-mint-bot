@@ -34,7 +34,7 @@ For each collection in `config.sales.collections`:
 1. load sales state
 2. determine current safe head
 3. derive sales block window from cursor to safe head
-4. run the trusted onchain ERC-721 detection path for supported collections
+4. run the trusted onchain detection path for supported collections
 5. normalize sale rows
 6. dedupe against processed state
 7. post new sales to Discord
@@ -66,31 +66,40 @@ That is acceptable for this system's intended use.
 
 ## Trusted path
 
-The trusted runtime path for supported collections is the reusable **onchain ERC-721 detection path**.
+The trusted runtime path for supported collections is the reusable **onchain detection path**.
 
 This onchain path is the canonical sales detection system for supported sale shapes.
 
 ---
 
-## Fallback Eligibility
+## Onchain Eligibility
 
-A collection is eligible for the generic sales fallback when:
+A collection is eligible for the current onchain sales detection path when:
 - it is in `config.sales.collections`
-- its `standard` is `erc721`
 - it has a non-empty `contractAddress`
-
-ERC-1155 collections are intentionally not covered by the current fallback.
+- and one of these supported standards/shapes applies:
+  - `erc721`
+  - `erc1155` with a sale transaction that resolves to exactly one token ID
 
 ---
 
 ## Supported Sale Shapes
 
-The current generalized fallback intentionally supports only a narrow set of sale shapes:
+The current onchain sales path intentionally supports only a narrow set of sale shapes:
 
 - ERC-721 transfer-based sale candidates
+- ERC-1155 transfer-based sale candidates that resolve to exactly one token ID in the transaction
 - Seaport/OpenSea-style marketplace detection using receipt/log matching
 - ETH-denominated sales detected from `tx.value`
 - WETH-denominated sales detected from WETH `Transfer` logs in the matched receipt
+
+For the supported ERC-1155 shape:
+- the full receipt NFT transfer context must stay consistent with that one tracked ERC-1155 token sale
+- post one sale for the token ID
+- quantity is the total quantity transferred for that token ID in the transaction
+- price is the total ETH/WETH paid for that token transaction
+- do not divide price per unit
+- do not post one message per unit
 
 This is deliberate. Narrow and correct is better than broad and flaky.
 
@@ -100,7 +109,8 @@ This is deliberate. Narrow and correct is better than broad and flaky.
 
 The current system does **not** attempt to fully support:
 
-- ERC-1155 fallback sales
+- ERC-1155 sales where multiple token IDs are involved and price attribution is ambiguous
+- ERC-1155 sales where the receipt includes additional NFT asset transfers that make full-tx price attribution ambiguous
 - non-Seaport marketplace detection beyond the currently recognized matcher scope
 - broad multi-currency pricing
 - ambiguous transaction shapes where sale classification is not confident
@@ -132,9 +142,9 @@ Discord sales posts should display price like:
 
 ### Supported decoding
 
-For supported fallback sales:
+For supported onchain sales:
 - if `tx.value > 0`, treat it as ETH sale price
-- otherwise, for supported single-transfer sale candidates, sum WETH `Transfer` logs from the buyer to derive WETH amount
+- otherwise, sum WETH `Transfer` logs from the buyer to derive WETH amount
 
 ### USD value
 
@@ -158,6 +168,7 @@ A usable normalized sale row should include, at minimum:
 - standard
 - contract
 - token ID
+- quantity
 - seller wallet
 - buyer wallet
 - transaction hash
@@ -188,6 +199,7 @@ New sales that survive dedupe should be posted to Discord.
 Current expectations:
 - supported collection name and metadata
 - token reference
+- quantity for ERC-1155 sales
 - buyer and seller display
 - marketplace reference
 - price line with native and USD when available
@@ -202,7 +214,7 @@ Keep:
 - poll start/skip
 - checked block window
 - cursor advance
-- fallback execution counts
+- onchain candidate counts
 - matched candidate counts
 - real errors
 
@@ -233,7 +245,7 @@ Do not assume the two lists serve the same purpose.
 
 When extending the sales system:
 - prefer generic collection-driven logic over collection-specific branches
-- preserve working ERC-721 fallback behavior
+- preserve working ERC-721 onchain behavior
 - do not broaden marketplace scope casually
 - do not add historical backfill as default runtime behavior
 - keep unsupported paths explicitly unsupported until intentionally implemented
@@ -243,7 +255,7 @@ When extending the sales system:
 ## When to Update This Doc
 
 Update this spec only when sales monitoring truth changes materially, such as:
-- fallback eligibility changes
+- onchain eligibility changes
 - marketplace support changes
 - pricing support changes
 - state/cursor behavior changes

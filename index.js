@@ -585,6 +585,11 @@ function supportsErc721SalesFallback(collection) {
     isNonEmptyString(collection?.contractAddress);
 }
 
+function supportsErc1155SalesDetection(collection) {
+  return safeString(collection?.standard).trim().toLowerCase() === "erc1155" &&
+    isNonEmptyString(collection?.contractAddress);
+}
+
 function isEthLikeCurrencySymbol(symbol) {
   const normalized = safeString(symbol).trim().toUpperCase();
   return normalized === "ETH" || normalized === "WETH";
@@ -670,10 +675,168 @@ function normalizeErc721OnchainCandidateToSales(candidate, collection) {
   if (normalizedSales.length > 0) {
     const salePriceNative = safeString(candidate?.salePriceNative).trim() || "missing";
     const currencySymbol = safeString(candidate?.currencySymbol).trim().toUpperCase() || "missing";
-    console.log(`[sales:onchain] fallback normalized tx=${safeLowercaseString(candidate?.transactionHash)} rows=${normalizedSales.length} salePriceNative=${salePriceNative} currencySymbol=${currencySymbol}`);
+    console.log(`[sales:onchain] normalized tx=${safeLowercaseString(candidate?.transactionHash)} rows=${normalizedSales.length} salePriceNative=${salePriceNative} currencySymbol=${currencySymbol}`);
   }
 
   return normalizedSales;
+}
+
+async function decodeErc1155SeaportEthLikeSalePrice(candidate, receipt) {
+  if (!candidate || !receipt) {
+    return { salePriceNative: "", currencySymbol: "" };
+  }
+
+  const buyerWallet = safeLowercaseAddress(candidate?.buyerWallet);
+  if (!buyerWallet) {
+    return { salePriceNative: "", currencySymbol: "" };
+  }
+
+  try {
+    const tx = await provider.getTransaction(candidate.transactionHash);
+    if (tx?.value != null && tx.value > 0n) {
+      return {
+        salePriceNative: ethers.formatEther(tx.value),
+        currencySymbol: "ETH",
+      };
+    }
+  } catch {}
+
+  let totalWeth = 0n;
+  for (const log of Array.isArray(receipt.logs) ? receipt.logs : []) {
+    if (safeLowercaseAddress(log?.address) !== safeLowercaseAddress(WETH_MAINNET_ADDRESS)) continue;
+    if (safeLowercaseString(log?.topics?.[0]) !== ERC20_TRANSFER_TOPIC.toLowerCase()) continue;
+
+    try {
+      const parsed = ERC20_TRANSFER_IFACE.parseLog(log);
+      if (parsed?.name !== "Transfer") continue;
+
+      const from = safeLowercaseAddress(parsed.args.from);
+      if (from !== buyerWallet) continue;
+
+      const value = BigInt(parsed.args.value?.toString?.() ?? "0");
+      if (value > 0n) totalWeth += value;
+    } catch {}
+  }
+
+  if (totalWeth > 0n) {
+    return {
+      salePriceNative: ethers.formatEther(totalWeth),
+      currencySymbol: "WETH",
+    };
+  }
+
+  return { salePriceNative: "", currencySymbol: "" };
+}
+
+function normalizeErc1155OnchainCandidateToSales(candidate, collection) {
+  const quantity = safeString(candidate?.quantity).trim();
+  const tokenId = safeString(candidate?.tokenId).trim();
+  const contract = safeLowercaseAddress(collection?.contractAddress);
+
+  if (!tokenId || !quantity || quantity === "0") {
+    return [];
+  }
+
+  const normalizedSale = {
+    projectKey: `${contract}:${tokenId}`,
+    collection: safeString(collection?.name).trim(),
+    standard: safeString(collection?.standard).trim().toLowerCase(),
+    quantity,
+    sellerWallet: safeLowercaseAddress(candidate?.sellerWallet),
+    buyerWallet: safeLowercaseAddress(candidate?.buyerWallet),
+    salePriceNative: safeString(candidate?.salePriceNative).trim(),
+    currencySymbol: safeString(candidate?.currencySymbol).trim().toUpperCase(),
+    marketplace: safeString(candidate?.matchedBy || candidate?.marketplaceAddressMatched).trim().toLowerCase(),
+    tokenId,
+    contract,
+    txHash: safeLowercaseString(candidate?.transactionHash),
+    blockNumber: safeString(candidate?.blockNumber).trim(),
+    logIndex: safeString(candidate?.logIndex).trim(),
+  };
+
+  const salePriceNative = safeString(candidate?.salePriceNative).trim() || "missing";
+  const currencySymbol = safeString(candidate?.currencySymbol).trim().toUpperCase() || "missing";
+  console.log(
+    `[sales:onchain:erc1155] normalized tx=${safeLowercaseString(candidate?.transactionHash)} tokenId=${tokenId} quantity=${quantity} salePriceNative=${salePriceNative} currencySymbol=${currencySymbol}`
+  );
+
+  return [normalizedSale];
+}
+
+function receiptHasOnlySupportedErc1155SaleShape(receipt, candidate, collection) {
+  const contractAddress = safeLowercaseAddress(collection?.contractAddress);
+  const expectedTokenId = safeString(candidate?.tokenId).trim();
+  const expectedSeller = safeLowercaseAddress(candidate?.sellerWallet);
+  const expectedBuyer = safeLowercaseAddress(candidate?.buyerWallet);
+
+  if (!receipt || !contractAddress || !expectedTokenId || !expectedSeller || !expectedBuyer) {
+    return false;
+  }
+
+  const recordErc1155Move = (logAddress, from, to, tokenIdValue, quantityValue) => {
+    const normalizedAddress = safeLowercaseAddress(logAddress);
+    const normalizedFrom = safeLowercaseAddress(from);
+    const normalizedTo = safeLowercaseAddress(to);
+    const tokenId = safeString(tokenIdValue).trim();
+    const quantity = BigInt(quantityValue?.toString?.() ?? "0");
+
+    if (normalizedFrom === ZERO_ADDRESS_LOWER || normalizedTo === ZERO_ADDRESS_LOWER) return true;
+    if (quantity <= 0n) return true;
+    if (normalizedAddress !== contractAddress) return false;
+    if (tokenId !== expectedTokenId) return false;
+    if (normalizedFrom !== expectedSeller || normalizedTo !== expectedBuyer) return false;
+    return true;
+  };
+
+  for (const log of Array.isArray(receipt.logs) ? receipt.logs : []) {
+    const topic0 = safeLowercaseString(log?.topics?.[0]);
+
+    if (topic0 === safeLowercaseString(ERC1155_TRANSFER_SINGLE_TOPIC)) {
+      try {
+        const parsed = ERC1155_TRANSFER_IFACE.parseLog(log);
+        if (parsed?.name !== "TransferSingle") return false;
+        if (!recordErc1155Move(log?.address, parsed.args.from, parsed.args.to, parsed.args.id, parsed.args.value)) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      continue;
+    }
+
+    if (topic0 === safeLowercaseString(ERC1155_TRANSFER_BATCH_TOPIC)) {
+      try {
+        const parsed = ERC1155_TRANSFER_IFACE.parseLog(log);
+        if (parsed?.name !== "TransferBatch") return false;
+        const ids = parsed.args.ids || [];
+        const values = parsed.args.values || [];
+        for (let i = 0; i < ids.length; i++) {
+          if (!recordErc1155Move(log?.address, parsed.args.from, parsed.args.to, ids[i], values[i])) {
+            return false;
+          }
+        }
+      } catch {
+        return false;
+      }
+      continue;
+    }
+
+    if (topic0 === safeLowercaseString(ERC721_TRANSFER_TOPIC) && Array.isArray(log?.topics) && log.topics.length === 4) {
+      try {
+        const parsed = ERC721_TRANSFER_IFACE.parseLog(log);
+        if (parsed?.name !== "Transfer") return false;
+        const from = safeLowercaseAddress(parsed.args.from);
+        const to = safeLowercaseAddress(parsed.args.to);
+        if (from !== ZERO_ADDRESS_LOWER && to !== ZERO_ADDRESS_LOWER) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  return true;
 }
 
 async function formatSalePriceLine(sale) {
@@ -766,6 +929,9 @@ async function postSale(collection, sale) {
       [
         `Collection: **${safeString(collection?.name).trim()}**`,
         `Token#: **${tokenId}**`,
+        ...(safeString(sale?.standard || collection?.standard).trim().toLowerCase() === "erc1155"
+          ? [`Quantity: **${safeString(sale?.quantity).trim() || "1"}**`]
+          : []),
         `Artist: **${safeString(collection?.artist).trim() || "Unknown"}**`,
         `Price: **${priceLine}**`,
         `Seller: **${sellerDisplay}**`,
@@ -898,6 +1064,177 @@ async function findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toB
   return candidates;
 }
 
+async function findErc1155OnchainSaleCandidatesInRange(collection, fromBlock, toBlock) {
+  const boundedFromBlock = Math.max(0, Number(fromBlock) || 0);
+  const boundedToBlock = Math.max(boundedFromBlock, Number(toBlock) || boundedFromBlock);
+  const contractAddress = safeLowercaseAddress(collection?.contractAddress);
+
+  if (!contractAddress) return [];
+
+  console.log(`[sales:onchain:erc1155] range collection=${safeString(collection?.name).trim() || contractAddress} fromBlock=${boundedFromBlock} toBlock=${boundedToBlock}`);
+
+  const transferLogs = await provider.getLogs({
+    address: contractAddress,
+    fromBlock: boundedFromBlock,
+    toBlock: boundedToBlock,
+    topics: [[ERC1155_TRANSFER_SINGLE_TOPIC, ERC1155_TRANSFER_BATCH_TOPIC]],
+  });
+
+  const groupedTransfers = new Map();
+
+  for (const log of transferLogs) {
+    let parsed;
+    try {
+      parsed = ERC1155_TRANSFER_IFACE.parseLog(log);
+    } catch {
+      continue;
+    }
+
+    const txHash = safeLowercaseString(log.transactionHash);
+    if (!txHash) continue;
+
+    const existing = groupedTransfers.get(txHash) || {
+      transactionHash: txHash,
+      blockNumber: Number(log.blockNumber || 0),
+      tokenIds: [],
+      fromAddresses: [],
+      toAddresses: [],
+      transfers: [],
+      transferCount: 0,
+    };
+
+    const pushTransfer = (tokenIdValue, quantityValue) => {
+      const from = safeLowercaseAddress(parsed.args.from);
+      const to = safeLowercaseAddress(parsed.args.to);
+      const tokenId = safeString(tokenIdValue).trim();
+      const quantity = BigInt(quantityValue?.toString?.() ?? "0");
+      const logIndex = safeString(log.logIndex ?? log.index).trim();
+
+      if (from === ZERO_ADDRESS_LOWER || to === ZERO_ADDRESS_LOWER) return;
+      if (quantity <= 0n || !tokenId) return;
+
+      existing.transferCount += 1;
+      existing.tokenIds.push(tokenId);
+      existing.fromAddresses.push(from);
+      existing.toAddresses.push(to);
+      existing.transfers.push({
+        tokenId,
+        quantity: quantity.toString(),
+        from,
+        to,
+        logIndex,
+      });
+    };
+
+    if (parsed.name === "TransferSingle") {
+      pushTransfer(parsed.args.id, parsed.args.value);
+    } else if (parsed.name === "TransferBatch") {
+      const ids = parsed.args.ids || [];
+      const values = parsed.args.values || [];
+      for (let i = 0; i < ids.length; i++) {
+        pushTransfer(ids[i], values[i]);
+      }
+    }
+
+    if (!existing.blockNumber && Number(log.blockNumber || 0) > 0) {
+      existing.blockNumber = Number(log.blockNumber || 0);
+    }
+
+    if (existing.transfers.length > 0) {
+      groupedTransfers.set(txHash, existing);
+    }
+  }
+
+  const candidates = [];
+
+  for (const groupedTransfer of groupedTransfers.values()) {
+    const receipt = await provider.getTransactionReceipt(groupedTransfer.transactionHash);
+    if (!receipt) continue;
+
+    const receiptAddresses = new Set(
+      (Array.isArray(receipt.logs) ? receipt.logs : [])
+        .map((log) => safeLowercaseAddress(log?.address))
+        .filter(Boolean)
+    );
+
+    let marketplaceAddressMatched = "";
+    let matchedBy = "";
+
+    for (const matcher of KNOWN_MARKETPLACE_MATCHERS) {
+      if (receiptAddresses.has(matcher.address)) {
+        marketplaceAddressMatched = matcher.address;
+        matchedBy = matcher.matchedBy;
+        break;
+      }
+    }
+
+    if (!marketplaceAddressMatched) continue;
+
+    const uniqueTokenIds = [...new Set(groupedTransfer.tokenIds.filter(Boolean))];
+    if (uniqueTokenIds.length !== 1) {
+      console.log(
+        `[sales:onchain:erc1155] skip tx=${groupedTransfer.transactionHash} reason=multi-token-ids tokenIds=${uniqueTokenIds.join("|") || "none"}`
+      );
+      continue;
+    }
+
+    const uniqueSellers = [...new Set(groupedTransfer.fromAddresses.filter(Boolean))];
+    const uniqueBuyers = [...new Set(groupedTransfer.toAddresses.filter(Boolean))];
+    if (uniqueSellers.length !== 1 || uniqueBuyers.length !== 1) {
+      console.log(
+        `[sales:onchain:erc1155] skip tx=${groupedTransfer.transactionHash} reason=ambiguous-participants sellers=${uniqueSellers.length} buyers=${uniqueBuyers.length}`
+      );
+      continue;
+    }
+
+    const quantity = groupedTransfer.transfers.reduce((sum, transfer) => {
+      try {
+        return sum + BigInt(transfer.quantity);
+      } catch {
+        return sum;
+      }
+    }, 0n);
+    if (quantity <= 0n) continue;
+
+    const firstTransfer = groupedTransfer.transfers
+      .slice()
+      .sort((a, b) => Number(a.logIndex || 0) - Number(b.logIndex || 0))[0];
+
+    const candidate = {
+      transactionHash: groupedTransfer.transactionHash,
+      blockNumber: safeString(groupedTransfer.blockNumber).trim(),
+      tokenId: uniqueTokenIds[0],
+      quantity: quantity.toString(),
+      sellerWallet: uniqueSellers[0],
+      buyerWallet: uniqueBuyers[0],
+      marketplaceAddressMatched,
+      matchedBy,
+      transferCount: groupedTransfer.transferCount,
+      transfers: groupedTransfer.transfers.map((transfer) => ({ ...transfer })),
+      logIndex: safeString(firstTransfer?.logIndex).trim(),
+    };
+
+    if (!receiptHasOnlySupportedErc1155SaleShape(receipt, candidate, collection)) {
+      console.log(
+        `[sales:onchain:erc1155] skip tx=${groupedTransfer.transactionHash} reason=ambiguous-nft-transfer-context`
+      );
+      continue;
+    }
+
+    const { salePriceNative, currencySymbol } = await decodeErc1155SeaportEthLikeSalePrice(candidate, receipt);
+    candidate.salePriceNative = salePriceNative;
+    candidate.currencySymbol = currencySymbol;
+    candidates.push(candidate);
+
+    console.log(
+      `[sales:onchain:erc1155] candidate tx=${candidate.transactionHash} block=${candidate.blockNumber} tokenId=${candidate.tokenId} quantity=${candidate.quantity} transferCount=${candidate.transferCount} marketplace=${candidate.marketplaceAddressMatched} matchedBy=${candidate.matchedBy}`
+    );
+  }
+
+  console.log(`[sales:onchain:erc1155] candidate count=${candidates.length}`);
+  return candidates;
+}
+
 async function pollSalesOnce() {
   const salesConfig = config?.sales;
   if (!salesConfig || salesConfig.enabled !== true) {
@@ -924,6 +1261,7 @@ async function pollSalesOnce() {
     const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
     const collectionKey = safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
     const erc721FallbackEligible = supportsErc721SalesFallback(collection);
+    const erc1155SalesEligible = supportsErc1155SalesDetection(collection);
     const currentState = loadSalesState(collectionKey);
     const configuredStartBlock = Number.isInteger(collection.startBlock) && collection.startBlock >= 0
       ? collection.startBlock
@@ -950,16 +1288,25 @@ async function pollSalesOnce() {
     };
 
     try {
-      let fallbackRawCandidateCount = 0;
+      let onchainRawCandidateCount = 0;
       let normalizedSales = [];
       if (erc721FallbackEligible) {
         const onchainCandidates = await findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
-        fallbackRawCandidateCount = onchainCandidates.length;
+        onchainRawCandidateCount = onchainCandidates.length;
         normalizedSales = onchainCandidates.flatMap((candidate) =>
           normalizeErc721OnchainCandidateToSales(candidate, collection)
         );
         console.log(
-          `[sales:onchain] fallback collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
+          `[sales:onchain] collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
+        );
+      } else if (erc1155SalesEligible) {
+        const onchainCandidates = await findErc1155OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
+        onchainRawCandidateCount = onchainCandidates.length;
+        normalizedSales = onchainCandidates.flatMap((candidate) =>
+          normalizeErc1155OnchainCandidateToSales(candidate, collection)
+        );
+        console.log(
+          `[sales:onchain:erc1155] collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
         );
       }
       let newSalesCount = 0;
@@ -973,7 +1320,7 @@ async function pollSalesOnce() {
       }
 
       console.log(
-        `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} fallbackRawCandidates=${fallbackRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount}`
+        `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} onchainRawCandidates=${onchainRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount}`
       );
 
       nextState.lastProcessedBlock = toBlock;

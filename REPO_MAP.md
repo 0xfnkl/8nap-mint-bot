@@ -90,14 +90,14 @@ Purpose:
 Typical pieces involved:
 - sales state initialization near head
 - `pollSalesOnce()`
-- generic ERC-721 onchain detection path
+- generic onchain sales detection path
 - processed-state dedupe
 - Discord sale posting
 
 Guardrail:
 - do not assume historical backfill is intended
 - do not assume Alchemy is fully trustworthy
-- preserve working fallback behavior
+- preserve working onchain sales behavior
 
 ---
 
@@ -135,7 +135,7 @@ If changing state logic:
 - changing state persistence without understanding migration effects
 - touching mint and sales logic together without reason
 - mass-deleting collection references
-- widening fallback logic into unsupported sale shapes without validation
+- widening onchain sales logic into unsupported sale shapes without validation
 
 ---
 
@@ -164,6 +164,7 @@ The current trusted sales model is:
 - live monitoring near head
 - no default backfill
 - generic onchain ERC-721 detection for supported sales-monitored ERC-721 collections
+- narrow onchain ERC-1155 detection for supported single-token-ID sale transactions
 - Seaport/OpenSea-style marketplace detection
 - ETH/WETH price decoding for supported sale shapes
 - Discord sale posting after dedupe

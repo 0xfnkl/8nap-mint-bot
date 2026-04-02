@@ -173,6 +173,7 @@ Sales behavior is intentionally separate from mint behavior.
 - cursor initializes near head
 - cursor may be fast-forwarded near head if stale
 - onchain ERC-721 sales detection is the runtime path for supported sale shapes
+- narrow onchain ERC-1155 sales detection supports single-token-ID sale transactions
 - Discord posting should occur for newly detected sales
 
 ---
@@ -195,14 +196,14 @@ First determine which of these is true:
 1. sales poller did not run
 2. sales cursor was too far behind
 3. collection was not in `sales.collections`
-4. fallback did not classify the sale
+4. onchain detection did not classify the sale
 5. sale was deduped as already processed
 
 For live monitoring, first inspect:
 - current sales block window
 - cursor state
 - whether collection is sales-monitored
-- whether sale shape is supported by the fallback
+- whether sale shape is supported by the current onchain path
 
 ## Problem: sales cursor is far behind head
 
@@ -251,7 +252,7 @@ For every non-trivial change, review:
 
 - narrow config-only collection additions when possible
 - sales-only changes isolated to sales flow
-- generic ERC-721 sales fallback for sales-tracked ERC-721 collections
+- generic ERC-721 onchain sales detection for sales-tracked ERC-721 collections
 - live near-head sales cursor initialization
 - external diff review before commit/push
 
