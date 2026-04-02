@@ -850,7 +850,7 @@ function normalizeErc721OnchainCandidateToSales(candidate, collection) {
 
 async function formatSalePriceLine(sale) {
   if (!isNonEmptyString(sale?.salePriceNative)) {
-    return "Price: **Unavailable**";
+    return "Price: Unavailable";
   }
 
   const nativeAmount = safeString(sale.salePriceNative).trim();
@@ -858,28 +858,67 @@ async function formatSalePriceLine(sale) {
   const basePrice = currencySymbol ? `${nativeAmount} ${currencySymbol}` : nativeAmount;
 
   if (!isEthLikeCurrencySymbol(currencySymbol)) {
-    return `Price: **${basePrice}**`;
+    return `Price: ${basePrice}`;
   }
 
   const nativeAmountNumber = Number(nativeAmount);
   if (!Number.isFinite(nativeAmountNumber) || nativeAmountNumber < 0) {
-    return `Price: **${basePrice}**`;
+    return `Price: ${basePrice}`;
   }
 
   const ethUsd = await getEthPriceUsd();
   if (!ethUsd) {
-    return `Price: **${basePrice}**`;
+    return `Price: ${basePrice}`;
   }
 
-  return `Price: **${basePrice}** ($${(nativeAmountNumber * ethUsd).toFixed(2)})`;
+  return `Price: ${basePrice} ($${(nativeAmountNumber * ethUsd).toFixed(2)})`;
+}
+
+async function loadSaleRenderMetadata(collection, sale) {
+  const tokenId = safeString(sale?.tokenId).trim();
+  const standard = safeString(sale?.standard || collection?.standard).trim().toLowerCase();
+  const contractAddress = safeLowercaseAddress(sale?.contract || collection?.contractAddress);
+
+  if (!tokenId || !/^\d+$/.test(tokenId) || !contractAddress) {
+    return { artworkTitle: "", imageUrl: null };
+  }
+
+  let contract = null;
+  if (standard === "erc721") {
+    contract = new ethers.Contract(contractAddress, ERC721_ABI, provider);
+  } else if (standard === "erc1155") {
+    contract = new ethers.Contract(contractAddress, ERC1155_ABI, provider);
+  } else {
+    return { artworkTitle: "", imageUrl: null };
+  }
+
+  try {
+    const metadata = await retryAsync(() => loadMetadata(standard, contract, BigInt(tokenId)));
+    return {
+      artworkTitle: safeString(metadata?.name).trim(),
+      imageUrl: isNonEmptyString(metadata?.image) ? normalizeUri(metadata.image) : null,
+    };
+  } catch {
+    return { artworkTitle: "", imageUrl: null };
+  }
+}
+
+function buildSaleEmbedTitle(collectionName, tokenId, artworkTitle) {
+  const baseTitle = `${collectionName} #${tokenId}`;
+  const cleanArtworkTitle = safeString(artworkTitle).trim();
+
+  if (!cleanArtworkTitle) return baseTitle;
+  if (cleanArtworkTitle.toLowerCase().startsWith(baseTitle.toLowerCase())) {
+    return cleanArtworkTitle;
+  }
+
+  return `${baseTitle} - ${cleanArtworkTitle}`;
 }
 
 async function postSale(collection, sale) {
   const tokenId = safeString(sale?.tokenId).trim() || "unknown";
   const sellerWallet = safeLowercaseAddress(sale?.sellerWallet);
   const buyerWallet = safeLowercaseAddress(sale?.buyerWallet);
-  const marketplace = safeString(sale?.marketplace).trim() || "unknown";
-  const txHash = safeLowercaseString(sale?.txHash);
   const contract = safeLowercaseAddress(sale?.contract || collection?.contractAddress);
   const blockNumberText = safeString(sale?.blockNumber).trim();
 
@@ -887,6 +926,7 @@ async function postSale(collection, sale) {
   const buyerDisplay = buyerWallet ? await formatDisplayAddress(buyerWallet) : "unknown";
 
   const priceLine = await formatSalePriceLine(sale);
+  const { artworkTitle, imageUrl } = await loadSaleRenderMetadata(collection, sale);
 
   let timestampMs = Date.now();
   const blockNumber = Number(blockNumberText);
@@ -898,21 +938,22 @@ async function postSale(collection, sale) {
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(`${collection.name} Secondary Sale #${tokenId}`)
+    .setTitle(buildSaleEmbedTitle(safeString(collection?.name).trim(), tokenId, artworkTitle))
     .setDescription(
       [
-        `Collection: **${safeString(collection?.name).trim()}**`,
-        `Seller: **${sellerDisplay}**`,
-        `Buyer: **${buyerDisplay}**`,
-        `Marketplace: **${marketplace}**`,
+        `Collection: ${safeString(collection?.name).trim()}`,
+        `Artist: ${safeString(collection?.artist).trim() || "Unknown"}`,
         priceLine,
+        `Seller: ${sellerDisplay}`,
+        `Buyer: ${buyerDisplay}`,
         ``,
         `[View on OpenSea](${openseaUrl(contract, tokenId)})`,
-        txHash ? `Tx: https://etherscan.io/tx/${txHash}` : null,
       ].filter(Boolean).join("\n")
     )
     .setTimestamp(new Date(timestampMs))
     .setFooter({ text: safeString(collection?.name).trim() || "Sales" });
+
+  if (imageUrl) embed.setImage(imageUrl);
 
   const channel = await client.channels.fetch(config.sales.discordChannelId);
   await rateLimiter.send(channel, { embeds: [embed] });
