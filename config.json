@@ -17,6 +17,12 @@
         "artist": "RedruM",
         "standard": "erc721",
         "contractAddress": "0xd27ca58bc4f70e95a7f193965ae60ffce0d46a87"
+      },
+      {
+        "name": "Lil Pudgys",
+        "artist": "TheIglooCompany",
+        "standard": "erc721",
+        "contractAddress": "0x524cab2ec69124574082676e6f654a18df49a048"
       }
     ]
   },
