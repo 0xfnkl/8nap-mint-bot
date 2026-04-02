@@ -850,7 +850,7 @@ function normalizeErc721OnchainCandidateToSales(candidate, collection) {
 
 async function formatSalePriceLine(sale) {
   if (!isNonEmptyString(sale?.salePriceNative)) {
-    return "Price: Unavailable";
+    return "Unavailable";
   }
 
   const nativeAmount = safeString(sale.salePriceNative).trim();
@@ -858,20 +858,20 @@ async function formatSalePriceLine(sale) {
   const basePrice = currencySymbol ? `${nativeAmount} ${currencySymbol}` : nativeAmount;
 
   if (!isEthLikeCurrencySymbol(currencySymbol)) {
-    return `Price: ${basePrice}`;
+    return basePrice;
   }
 
   const nativeAmountNumber = Number(nativeAmount);
   if (!Number.isFinite(nativeAmountNumber) || nativeAmountNumber < 0) {
-    return `Price: ${basePrice}`;
+    return basePrice;
   }
 
   const ethUsd = await getEthPriceUsd();
   if (!ethUsd) {
-    return `Price: ${basePrice}`;
+    return basePrice;
   }
 
-  return `Price: ${basePrice} ($${(nativeAmountNumber * ethUsd).toFixed(2)})`;
+  return `${basePrice} ($${(nativeAmountNumber * ethUsd).toFixed(2)})`;
 }
 
 async function loadSaleRenderMetadata(collection, sale) {
@@ -904,15 +904,10 @@ async function loadSaleRenderMetadata(collection, sale) {
 }
 
 function buildSaleEmbedTitle(collectionName, tokenId, artworkTitle) {
-  const baseTitle = `${collectionName} #${tokenId}`;
   const cleanArtworkTitle = safeString(artworkTitle).trim();
 
-  if (!cleanArtworkTitle) return baseTitle;
-  if (cleanArtworkTitle.toLowerCase().startsWith(baseTitle.toLowerCase())) {
-    return cleanArtworkTitle;
-  }
-
-  return `${baseTitle} - ${cleanArtworkTitle}`;
+  if (cleanArtworkTitle) return cleanArtworkTitle;
+  return `${collectionName} #${tokenId}`;
 }
 
 async function postSale(collection, sale) {
@@ -941,11 +936,12 @@ async function postSale(collection, sale) {
     .setTitle(buildSaleEmbedTitle(safeString(collection?.name).trim(), tokenId, artworkTitle))
     .setDescription(
       [
-        `Collection: ${safeString(collection?.name).trim()}`,
-        `Artist: ${safeString(collection?.artist).trim() || "Unknown"}`,
-        priceLine,
-        `Seller: ${sellerDisplay}`,
-        `Buyer: ${buyerDisplay}`,
+        `Collection: **${safeString(collection?.name).trim()}**`,
+        `Token#: **${tokenId}**`,
+        `Artist: **${safeString(collection?.artist).trim() || "Unknown"}**`,
+        `Price: **${priceLine}**`,
+        `Seller: **${sellerDisplay}**`,
+        `Buyer: **${buyerDisplay}**`,
         ``,
         `[View on OpenSea](${openseaUrl(contract, tokenId)})`,
       ].filter(Boolean).join("\n")
