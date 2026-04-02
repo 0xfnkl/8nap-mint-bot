@@ -665,6 +665,7 @@ function normalizeSaleRecord(rawSale, collection) {
   return {
     projectKey: standard === "erc1155" && tokenId ? `${contract}:${tokenId}` : contract,
     collection: safeString(collection?.name).trim(),
+    source: "primary",
     standard,
     quantity,
     sellerWallet,
@@ -810,6 +811,7 @@ async function getNFTSalesPage(collection, options = {}) {
 
   return {
     sales: normalizedSales,
+    rawSaleCount: nftSales.length,
     pageKey: isNonEmptyString(data?.pageKey) ? String(data.pageKey).trim() : "",
     validAt: {
       blockNumber: safeString(data?.validAt?.blockNumber).trim(),
@@ -825,6 +827,7 @@ function normalizeErc721OnchainCandidateToSales(candidate, collection) {
   const normalizedSales = transfers.map((transfer) => ({
     projectKey: contract,
     collection: safeString(collection?.name).trim(),
+    source: "fallback",
     standard: safeString(collection?.standard).trim().toLowerCase(),
     quantity: "1",
     sellerWallet: safeLowercaseAddress(transfer?.from),
@@ -1122,6 +1125,17 @@ async function pollSalesOnce() {
     };
 
     try {
+      const sourceMetrics = {
+        primaryAttempted: true,
+        primaryRawCount: 0,
+        primaryNormalizedCount: 0,
+        fallbackInvoked: false,
+        fallbackRawCandidateCount: 0,
+        fallbackNormalizedCount: 0,
+        postedPrimaryCount: 0,
+        postedFallbackCount: 0,
+      };
+
       const page = await getNFTSalesPage(collection, {
         fromBlock,
         toBlock,
@@ -1130,11 +1144,16 @@ async function pollSalesOnce() {
       });
 
       let normalizedSales = Array.isArray(page.sales) ? page.sales : [];
+      sourceMetrics.primaryRawCount = Number(page.rawSaleCount || 0);
+      sourceMetrics.primaryNormalizedCount = normalizedSales.length;
       if (normalizedSales.length === 0 && erc721FallbackEligible) {
+        sourceMetrics.fallbackInvoked = true;
         const onchainCandidates = await findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
+        sourceMetrics.fallbackRawCandidateCount = onchainCandidates.length;
         normalizedSales = onchainCandidates.flatMap((candidate) =>
           normalizeErc721OnchainCandidateToSales(candidate, collection)
         );
+        sourceMetrics.fallbackNormalizedCount = normalizedSales.length;
         console.log(
           `[sales:onchain] fallback collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
         );
@@ -1147,10 +1166,15 @@ async function pollSalesOnce() {
         await postSale(collection, sale);
         nextState.processed[key] = true;
         newSalesCount += 1;
+        if (safeString(sale?.source).trim().toLowerCase() === "fallback") {
+          sourceMetrics.postedFallbackCount += 1;
+        } else {
+          sourceMetrics.postedPrimaryCount += 1;
+        }
       }
 
       console.log(
-        `[sales] collection=${collectionName} normalizedSales=${normalizedSales.length} newSales=${newSalesCount} pageKey=${page.pageKey ? "present" : "absent"}`
+        `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} primaryAttempted=${sourceMetrics.primaryAttempted ? "yes" : "no"} primaryRaw=${sourceMetrics.primaryRawCount} primaryNormalized=${sourceMetrics.primaryNormalizedCount} fallbackInvoked=${sourceMetrics.fallbackInvoked ? "yes" : "no"} fallbackRawCandidates=${sourceMetrics.fallbackRawCandidateCount} fallbackNormalized=${sourceMetrics.fallbackNormalizedCount} posted=${newSalesCount} postedPrimary=${sourceMetrics.postedPrimaryCount} postedFallback=${sourceMetrics.postedFallbackCount} pageKey=${page.pageKey ? "present" : "absent"}`
       );
 
       if (page.pageKey) {
