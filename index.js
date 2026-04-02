@@ -545,31 +545,6 @@ function appendSaleToLedger(row, timestampMs) {
   fs.appendFileSync(filePath, line);
 }
 
-function alchemyNftApiBaseUrlFromRpcUrl(rpcUrl) {
-  const rawUrl = String(rpcUrl || "").trim();
-  if (!rawUrl) {
-    throw new Error("RPC_HTTP_URL is required to derive the Alchemy NFT API endpoint.");
-  }
-
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new Error("RPC_HTTP_URL is not a valid URL.");
-  }
-
-  if (!parsed.hostname.includes("alchemy.com")) {
-    throw new Error("RPC_HTTP_URL is not an Alchemy endpoint.");
-  }
-
-  const parts = parsed.pathname.split("/").filter(Boolean);
-  if (parts.length < 2 || parts[0] !== "v2" || !isNonEmptyString(parts[1])) {
-    throw new Error("RPC_HTTP_URL is not an Alchemy v2 endpoint.");
-  }
-
-  return `${parsed.origin}/nft/v3/${parts[1]}`;
-}
-
 function safeLowercaseAddress(value) {
   return isNonEmptyString(value) ? String(value).trim().toLowerCase() : "";
 }
@@ -581,104 +556,6 @@ function safeLowercaseString(value) {
 function safeString(value) {
   if (value === null || value === undefined) return "";
   return String(value);
-}
-
-function normalizeOrder(value) {
-  return value === "desc" ? "desc" : "asc";
-}
-
-function normalizeLimit(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 1) return 1000;
-  return Math.min(1000, Math.floor(parsed));
-}
-
-function normalizeFeeAmount(amount) {
-  try {
-    if (!isNonEmptyString(amount)) return null;
-    return BigInt(String(amount).trim());
-  } catch {
-    return null;
-  }
-}
-
-function normalizeDocumentedGrossSalePrice(rawSale) {
-  // Alchemy's getNFTSales docs and tutorial describe gross sale price as the sum of
-  // sellerFee + protocolFee + royaltyFee. Only use that calculation when all
-  // three documented fee objects are present and agree on symbol/decimals.
-  const feeEntries = [
-    rawSale?.sellerFee,
-    rawSale?.protocolFee,
-    rawSale?.royaltyFee,
-  ];
-
-  if (feeEntries.some((fee) => !fee || typeof fee !== "object")) {
-    return { salePriceNative: "", currencySymbol: "" };
-  }
-
-  const normalizedFees = feeEntries.map((fee) => ({
-    amount: normalizeFeeAmount(fee.amount),
-    symbol: safeString(fee.symbol).trim().toUpperCase(),
-    decimals: Number(fee.decimals),
-  }));
-
-  if (normalizedFees.some((fee) => fee.amount == null)) {
-    return { salePriceNative: "", currencySymbol: "" };
-  }
-
-  const symbols = [...new Set(normalizedFees.map((fee) => fee.symbol).filter((symbol) => symbol.length > 0))];
-  const decimals = [...new Set(
-    normalizedFees
-      .map((fee) => fee.decimals)
-      .filter((value) => Number.isInteger(value) && value >= 0)
-  )];
-
-  if (symbols.length !== 1 || decimals.length !== 1) {
-    return { salePriceNative: "", currencySymbol: "" };
-  }
-
-  const totalAmount = normalizedFees.reduce((sum, fee) => sum + fee.amount, 0n);
-
-  try {
-    return {
-      salePriceNative: ethers.formatUnits(totalAmount, decimals[0]),
-      currencySymbol: symbols[0],
-    };
-  } catch {
-    return { salePriceNative: "", currencySymbol: "" };
-  }
-}
-
-function normalizeSaleRecord(rawSale, collection) {
-  const standard = safeString(collection?.standard).trim().toLowerCase();
-  const tokenId = safeString(rawSale?.tokenId).trim();
-  const contract = safeLowercaseAddress(rawSale?.contractAddress || collection?.contractAddress);
-  const quantity = safeString(rawSale?.quantity).trim();
-  const buyerWallet = safeLowercaseAddress(rawSale?.buyerAddress);
-  const sellerWallet = safeLowercaseAddress(rawSale?.sellerAddress);
-  const marketplace = safeString(rawSale?.marketplace).trim().toLowerCase();
-  const txHash = safeLowercaseString(rawSale?.transactionHash);
-  const blockNumber = safeString(rawSale?.blockNumber).trim();
-  const logIndex = safeString(rawSale?.logIndex).trim();
-  const { salePriceNative, currencySymbol } = normalizeDocumentedGrossSalePrice(rawSale);
-
-  return {
-    projectKey: standard === "erc1155" && tokenId ? `${contract}:${tokenId}` : contract,
-    collection: safeString(collection?.name).trim(),
-    source: "primary",
-    standard,
-    quantity,
-    sellerWallet,
-    buyerWallet,
-    salePriceNative,
-    currencySymbol,
-    marketplace,
-    tokenId,
-    contract,
-    txHash,
-    blockNumber,
-    logIndex,
-  };
 }
 
 function saleKeyFromRecord(sale) {
@@ -770,64 +647,12 @@ async function decodeErc721SeaportEthLikeSalePrice(candidate, receipt) {
 
 const mintPollingCollections = config.collections.filter((collection) => !isIssuesSalesCollection(collection));
 
-async function getNFTSalesPage(collection, options = {}) {
-  const contractAddress = safeLowercaseAddress(collection?.contractAddress);
-  if (!contractAddress) {
-    throw new Error("collection.contractAddress is required.");
-  }
-
-  const fromBlock = safeString(options.fromBlock || "0");
-  const toBlock = safeString(options.toBlock || "latest");
-  const order = normalizeOrder(options.order);
-  const limit = String(normalizeLimit(options.limit));
-
-  const url = new URL(`${alchemyNftApiBaseUrlFromRpcUrl(process.env.RPC_HTTP_URL)}/getNFTSales`);
-  url.searchParams.set("contractAddress", contractAddress);
-  url.searchParams.set("fromBlock", fromBlock);
-  url.searchParams.set("toBlock", toBlock);
-  url.searchParams.set("order", order);
-  url.searchParams.set("limit", limit);
-  if (isNonEmptyString(options.pageKey)) {
-    url.searchParams.set("pageKey", String(options.pageKey).trim());
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-  let res;
-  try {
-    res = await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-
-  if (!res.ok) {
-    throw new Error(`alchemy getNFTSales http ${res.status}`);
-  }
-
-  const data = await res.json();
-  const nftSales = Array.isArray(data?.nftSales) ? data.nftSales : [];
-  const normalizedSales = nftSales.map((rawSale) => normalizeSaleRecord(rawSale, collection));
-
-  return {
-    sales: normalizedSales,
-    rawSaleCount: nftSales.length,
-    pageKey: isNonEmptyString(data?.pageKey) ? String(data.pageKey).trim() : "",
-    validAt: {
-      blockNumber: safeString(data?.validAt?.blockNumber).trim(),
-      blockHash: safeString(data?.validAt?.blockHash).trim().toLowerCase(),
-      blockTimestamp: safeString(data?.validAt?.blockTimestamp).trim(),
-    },
-  };
-}
-
 function normalizeErc721OnchainCandidateToSales(candidate, collection) {
   const transfers = Array.isArray(candidate?.transfers) ? candidate.transfers : [];
   const contract = safeLowercaseAddress(collection?.contractAddress);
   const normalizedSales = transfers.map((transfer) => ({
     projectKey: contract,
     collection: safeString(collection?.name).trim(),
-    source: "fallback",
     standard: safeString(collection?.standard).trim().toLowerCase(),
     quantity: "1",
     sellerWallet: safeLowercaseAddress(transfer?.from),
@@ -1125,35 +950,14 @@ async function pollSalesOnce() {
     };
 
     try {
-      const sourceMetrics = {
-        primaryAttempted: true,
-        primaryRawCount: 0,
-        primaryNormalizedCount: 0,
-        fallbackInvoked: false,
-        fallbackRawCandidateCount: 0,
-        fallbackNormalizedCount: 0,
-        postedPrimaryCount: 0,
-        postedFallbackCount: 0,
-      };
-
-      const page = await getNFTSalesPage(collection, {
-        fromBlock,
-        toBlock,
-        order: "asc",
-        limit: 1000,
-      });
-
-      let normalizedSales = Array.isArray(page.sales) ? page.sales : [];
-      sourceMetrics.primaryRawCount = Number(page.rawSaleCount || 0);
-      sourceMetrics.primaryNormalizedCount = normalizedSales.length;
-      if (normalizedSales.length === 0 && erc721FallbackEligible) {
-        sourceMetrics.fallbackInvoked = true;
+      let fallbackRawCandidateCount = 0;
+      let normalizedSales = [];
+      if (erc721FallbackEligible) {
         const onchainCandidates = await findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
-        sourceMetrics.fallbackRawCandidateCount = onchainCandidates.length;
+        fallbackRawCandidateCount = onchainCandidates.length;
         normalizedSales = onchainCandidates.flatMap((candidate) =>
           normalizeErc721OnchainCandidateToSales(candidate, collection)
         );
-        sourceMetrics.fallbackNormalizedCount = normalizedSales.length;
         console.log(
           `[sales:onchain] fallback collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
         );
@@ -1166,28 +970,17 @@ async function pollSalesOnce() {
         await postSale(collection, sale);
         nextState.processed[key] = true;
         newSalesCount += 1;
-        if (safeString(sale?.source).trim().toLowerCase() === "fallback") {
-          sourceMetrics.postedFallbackCount += 1;
-        } else {
-          sourceMetrics.postedPrimaryCount += 1;
-        }
       }
 
       console.log(
-        `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} primaryAttempted=${sourceMetrics.primaryAttempted ? "yes" : "no"} primaryRaw=${sourceMetrics.primaryRawCount} primaryNormalized=${sourceMetrics.primaryNormalizedCount} fallbackInvoked=${sourceMetrics.fallbackInvoked ? "yes" : "no"} fallbackRawCandidates=${sourceMetrics.fallbackRawCandidateCount} fallbackNormalized=${sourceMetrics.fallbackNormalizedCount} posted=${newSalesCount} postedPrimary=${sourceMetrics.postedPrimaryCount} postedFallback=${sourceMetrics.postedFallbackCount} pageKey=${page.pageKey ? "present" : "absent"}`
+        `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} fallbackRawCandidates=${fallbackRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount}`
       );
 
-      if (page.pageKey) {
-        console.log(
-          `[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${persistedLastProcessedBlock} reason=pageKey-present`
-        );
-      } else {
-        nextState.lastProcessedBlock = toBlock;
-        advancedAny = true;
-        console.log(
-          `[sales] cursor advance collection=${collectionName} from=${persistedLastProcessedBlock} to=${nextState.lastProcessedBlock}`
-        );
-      }
+      nextState.lastProcessedBlock = toBlock;
+      advancedAny = true;
+      console.log(
+        `[sales] cursor advance collection=${collectionName} from=${persistedLastProcessedBlock} to=${nextState.lastProcessedBlock}`
+      );
 
       saveSalesState(collectionKey, nextState);
     } catch (e) {

@@ -34,12 +34,11 @@ For each collection in `config.sales.collections`:
 1. load sales state
 2. determine current safe head
 3. derive sales block window from cursor to safe head
-4. try the normal sales source
-5. if needed, run the trusted onchain ERC-721 fallback
-6. normalize sale rows
-7. dedupe against processed state
-8. post new sales to Discord
-9. persist updated sales state
+4. run the trusted onchain ERC-721 detection path for supported collections
+5. normalize sale rows
+6. dedupe against processed state
+7. post new sales to Discord
+8. persist updated sales state
 
 ---
 
@@ -65,20 +64,11 @@ That is acceptable for this system's intended use.
 
 ## Current Source Strategy
 
-## Alchemy
-
-Alchemy may still be queried, but it is **not trusted as sole truth source**.
-
-Reason:
-- it proved stale/unreliable for live sales detection in practice
-
-Do not assume that a zero or incomplete Alchemy result means no sale occurred.
-
 ## Trusted path
 
-The trusted path for supported collections is the reusable **onchain ERC-721 fallback**.
+The trusted runtime path for supported collections is the reusable **onchain ERC-721 detection path**.
 
-This fallback is the system that should be trusted for supported sale shapes when the normal source is empty or unusable.
+This onchain path is the canonical sales detection system for supported sale shapes.
 
 ---
 

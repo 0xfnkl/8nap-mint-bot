@@ -172,7 +172,7 @@ Sales behavior is intentionally separate from mint behavior.
 - no default historical backfill
 - cursor initializes near head
 - cursor may be fast-forwarded near head if stale
-- ERC-721 sales fallback exists for supported sale shapes
+- onchain ERC-721 sales detection is the runtime path for supported sale shapes
 - Discord posting should occur for newly detected sales
 
 ---

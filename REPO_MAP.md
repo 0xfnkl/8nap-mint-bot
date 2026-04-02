@@ -90,8 +90,7 @@ Purpose:
 Typical pieces involved:
 - sales state initialization near head
 - `pollSalesOnce()`
-- normal sales source
-- generic ERC-721 onchain fallback
+- generic ERC-721 onchain detection path
 - processed-state dedupe
 - Discord sale posting
 
@@ -164,7 +163,7 @@ The current trusted sales model is:
 
 - live monitoring near head
 - no default backfill
-- generic ERC-721 fallback for supported sales-monitored ERC-721 collections
+- generic onchain ERC-721 detection for supported sales-monitored ERC-721 collections
 - Seaport/OpenSea-style marketplace detection
 - ETH/WETH price decoding for supported sale shapes
 - Discord sale posting after dedupe
