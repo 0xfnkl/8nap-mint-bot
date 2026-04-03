@@ -19,10 +19,88 @@
         "contractAddress": "0xd27ca58bc4f70e95a7f193965ae60ffce0d46a87"
       },
       {
-        "name": "The Memes by 6529",
-        "artist": "6529",
+        "name": "Relics of a Fractured Horizon",
+        "artist": "Ren",
+        "standard": "erc721",
+        "contractAddress": "0xb86CC4Be9a0b4Dea3B0F1622B3B470BC94Ea2C82"
+      },
+      {
+        "name": "8NAP Art Cards",
+        "artist": "8NAP ART",
         "standard": "erc1155",
-        "contractAddress": "0x33fd426905f149f8376e227d0c9d3340aad17af1"
+        "contractAddress": "0x43bF691da198b5d43d500768957a7660707A6531"
+      },
+      {
+        "name": "Surreal Sky",
+        "artist": "MACBETH",
+        "standard": "erc721",
+        "contractAddress": "0x9551Ec1997Ad76fdf84240B7d5B4a5EDab829a19"
+      },
+      {
+        "name": "What Cities Hold",
+        "artist": "sigmax",
+        "standard": "erc721",
+        "contractAddress": "0xE0b3DF70993aa148Ea47f3F028bF76c88ACb2671"
+      },
+      {
+        "name": "Where The West Stands Still",
+        "artist": "sigmax",
+        "standard": "erc1155",
+        "contractAddress": "0x7bCDe03D10038A712adC1f254189Ce470b36D4bA"
+      },
+      {
+        "name": "8NAP Masters Series",
+        "artist": "8NAP ART",
+        "standard": "erc1155",
+        "contractAddress": "0x10aBB881AdD1de70D4A9b2C712b9a8ac8853418B"
+      },
+      {
+        "name": "The Weight of Almost",
+        "artist": "Mind Mechanic",
+        "standard": "erc1155",
+        "contractAddress": "0xCd7C00cc8dD5dD4A0DaE48ccd692EdbD6223e375"
+      },
+      {
+        "name": "The Red Series",
+        "artist": "Jake Inez",
+        "standard": "erc1155",
+        "contractAddress": "0x4166924fEfDEf6d1Df9769118Cf0CD5A1FdE41B7"
+      },
+      {
+        "name": "Export Control",
+        "artist": "Amadon",
+        "standard": "erc1155",
+        "contractAddress": "0x86427BCe68b3927192eF7f06FEe1B6773Ba41ba9"
+      },
+      {
+        "name": "Old Tech in the West",
+        "artist": "DeltaSauce",
+        "standard": "erc1155",
+        "contractAddress": "0x46ADfADAd1434745617C4bc2592A28a2e634602D"
+      },
+      {
+        "name": "Echoes",
+        "artist": "Cory Haber",
+        "standard": "erc721",
+        "contractAddress": "0x62e58fe8285733Cd5B0853158c2D2A054B45DE4F"
+      },
+      {
+        "name": "pREDa",
+        "artist": "RedruM",
+        "standard": "erc1155",
+        "contractAddress": "0x28a6307f305b276eAF7099C6996264b11d00Fa66"
+      },
+      {
+        "name": "IsoMetro",
+        "artist": "Rick Crane and Rich Poole",
+        "standard": "erc721",
+        "contractAddress": "0xc43234A9892bC44Efad5b2DA8f36BC851aac06D3"
+      },
+      {
+        "name": "8NAP ART Pass",
+        "artist": "8NAP ART",
+        "standard": "erc721",
+        "contractAddress": "0xabcf18bf1937e3d7bac7ac743b7829ad6ad6d2ca"
       }
     ]
   },
