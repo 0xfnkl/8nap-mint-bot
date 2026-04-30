@@ -208,7 +208,10 @@ function parseValidatedIntegerEnv(name, fallback, min) {
   return parsed;
 }
 
-const POLL_MS = parseValidatedIntegerEnv("POLL_MS", 15000, 1000);          // 15s
+const MINT_POLL_MS = process.env.MINT_POLL_MS !== undefined
+  ? parseValidatedIntegerEnv("MINT_POLL_MS", 60000, 1000)
+  : parseValidatedIntegerEnv("POLL_MS", 60000, 1000);
+const SALES_POLL_MS = parseValidatedIntegerEnv("SALES_POLL_MS", 1800000, 1000);
 const CONFIRMATIONS = parseValidatedIntegerEnv("CONFIRMATIONS", 2, 0);     // reorg safety
 const MAX_BLOCK_RANGE = parseValidatedIntegerEnv("MAX_BLOCK_RANGE", 5, 1); // <= 10 for Alchemy free constraints
 const HOLDERS_MAX_BLOCK_RANGE = Math.max(MAX_BLOCK_RANGE, 5000);
@@ -3074,7 +3077,7 @@ async function startPolling() {
     }
   }
 
-  console.log(`✅ Polling started. interval=${POLL_MS}ms confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
+  console.log(`✅ Polling started. mintInterval=${MINT_POLL_MS}ms salesInterval=${SALES_POLL_MS}ms salesEnabled=${config?.sales?.enabled === true} confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
 
   // run immediately, then interval
   console.log("[startup:startPolling] before first immediate pollOnce()");
@@ -3104,8 +3107,8 @@ pollTimer = setInterval(() => {
   }).finally(() => {
     pollInFlight = false;
   });
-}, POLL_MS);
-  console.log("[startup:startPolling] recurring poll interval started");
+}, MINT_POLL_MS);
+  console.log(`[startup:startPolling] recurring mint poll interval started interval=${MINT_POLL_MS}ms`);
 
   salesPollTimer = setInterval(() => {
     if (salesPollInFlight) {
@@ -3120,8 +3123,8 @@ pollTimer = setInterval(() => {
     }).finally(() => {
       salesPollInFlight = false;
     });
-  }, POLL_MS);
-  console.log("[startup:startPolling] recurring sales poll interval started");
+  }, SALES_POLL_MS);
+  console.log(`[startup:startPolling] recurring sales poll interval started interval=${SALES_POLL_MS}ms enabled=${config?.sales?.enabled === true}`);
 }
 
 // Heartbeat
