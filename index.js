@@ -151,6 +151,12 @@ function validateConfig(cfg) {
       if (collection.previewS3Id !== undefined && !Number.isFinite(collection.previewS3Id)) {
         errors.push(`${where}.previewS3Id must be a number when provided.`);
       }
+      if (collection.previewSize !== undefined && !isNonEmptyString(collection.previewSize)) {
+        errors.push(`${where}.previewSize must be a non-empty string when provided.`);
+      }
+      if (collection.collectionUrl !== undefined && !isNonEmptyString(collection.collectionUrl)) {
+        errors.push(`${where}.collectionUrl must be a non-empty string when provided.`);
+      }
 
       if (collection.preview !== undefined) {
         if (!collection.preview || typeof collection.preview !== "object" || Array.isArray(collection.preview)) {
@@ -161,6 +167,9 @@ function validateConfig(cfg) {
           }
           if (collection.preview.s3Id !== undefined && !Number.isFinite(collection.preview.s3Id)) {
             errors.push(`${where}.preview.s3Id must be a number when provided.`);
+          }
+          if (collection.preview.size !== undefined && !isNonEmptyString(collection.preview.size)) {
+            errors.push(`${where}.preview.size must be a non-empty string when provided.`);
           }
         }
       }
@@ -214,6 +223,7 @@ const MINT_POLL_MS = process.env.MINT_POLL_MS !== undefined
 const SALES_POLL_MS = parseValidatedIntegerEnv("SALES_POLL_MS", 1800000, 1000);
 const CONFIRMATIONS = parseValidatedIntegerEnv("CONFIRMATIONS", 2, 0);     // reorg safety
 const MAX_BLOCK_RANGE = parseValidatedIntegerEnv("MAX_BLOCK_RANGE", 5, 1); // <= 10 for Alchemy free constraints
+const AUCTION_BID_LOOKBACK_BLOCKS = parseValidatedIntegerEnv("AUCTION_BID_LOOKBACK_BLOCKS", 10000, 0);
 const HOLDERS_MAX_BLOCK_RANGE = Math.max(MAX_BLOCK_RANGE, 5000);
 console.log("[startup] numeric env vars validated");
 
@@ -1562,6 +1572,13 @@ const AUCTION_ABI = [
   "event PieceRevealed()",
   "event NewBidPlaced((address payable bidder, uint256 amount) bid)",
   "function totalSupply() view returns (uint256)",
+  "function highestBid() view returns (uint256)",
+  "function highestBidAmount() view returns (uint256)",
+  "function currentBid() view returns (address bidder, uint256 amount)",
+  "function winningBid() view returns (address bidder, uint256 amount)",
+  "function lastBid() view returns (address bidder, uint256 amount)",
+  "function bids(uint256 tokenId) view returns (address bidder, uint256 amount)",
+  "function tokenBids(uint256 tokenId) view returns (address bidder, uint256 amount)",
 ];
 
 const ERC165_ABI = [
@@ -2204,23 +2221,39 @@ function openseaUrl(contractAddress, tokenId) {
   return `https://opensea.io/assets/${CHAIN}/${contractAddress}/${tokenId}`;
 }
 
-function auctionViewLink(collectionName) {
+function auctionViewLink(collection) {
+  const configuredUrl = safeString(collection?.collectionUrl).trim();
+  if (configuredUrl) return configuredUrl;
+
+  const collectionName = safeString(collection?.name).trim();
   return collectionName === "Issues"
     ? "https://8nap.art/collection/issues"
     : "https://8nap.art/collection/metamorphosis";
 }
 
-function s3Preview(collection, tokenIdStr) {
+function s3PreviewCandidates(collection, tokenIdStr) {
   let s3Id = null;
+  let previewSize = "small";
 
   if (typeof collection?.previewS3Id === "number") {
     s3Id = collection.previewS3Id;
+    if (isNonEmptyString(collection?.previewSize)) {
+      previewSize = collection.previewSize.trim();
+    }
   } else if (collection?.preview?.enabled === true && typeof collection?.preview?.s3Id === "number") {
     s3Id = collection.preview.s3Id;
+    if (isNonEmptyString(collection?.preview?.size)) {
+      previewSize = collection.preview.size.trim();
+    }
   }
 
-  if (s3Id == null) return null;
-  return `https://8nap.s3.eu-central-1.amazonaws.com/previews/${s3Id}/small/${tokenIdStr}`;
+  if (s3Id == null) return [];
+
+  return [`https://8nap.s3.eu-central-1.amazonaws.com/previews/${s3Id}/${previewSize}/${tokenIdStr}`];
+}
+
+function s3Preview(collection, tokenIdStr) {
+  return s3PreviewCandidates(collection, tokenIdStr)[0] || null;
 }
 async function previewExists(url) {
   try {
@@ -2231,16 +2264,23 @@ async function previewExists(url) {
   }
 }
 
+async function resolveS3Preview(collection, tokenIdStr) {
+  if (tokenIdStr === "unknown") return null;
+
+  for (const url of s3PreviewCandidates(collection, tokenIdStr)) {
+    if (await previewExists(url)) return url;
+  }
+
+  return null;
+}
+
 
 async function postAuctionEnded(collection, tokenIdStr, winner, amountWei, txHash, blockNumber) {
 
   let imageUrl = null;
-if (tokenIdStr !== "unknown") {
-  const previewUrl = s3Preview(collection, tokenIdStr);
-  if (previewUrl && await previewExists(previewUrl)) {
-    imageUrl = previewUrl;
+  if (tokenIdStr !== "unknown") {
+    imageUrl = await resolveS3Preview(collection, tokenIdStr);
   }
-}
 
   const winnerDisplay = await formatDisplayAddress(winner);
   const amountEth = ethers.formatEther(amountWei);
@@ -2261,7 +2301,7 @@ if (tokenIdStr !== "unknown") {
         `Winner: **${winnerDisplay}**`,
         `Amount: **${amountEth} ETH**`,
         ``,
-        `[View on 8NAP](${auctionViewLink(collection.name)})`,
+        `[View on 8NAP](${auctionViewLink(collection)})`,
         `Tx: https://etherscan.io/tx/${txHash}`,
       ].join("\n")
     )
@@ -2381,7 +2421,7 @@ try {
 
 async function postPieceRevealed(collection, tokenIdStr, txHash, blockNumber) {
 
-  const imageUrl = tokenIdStr !== "unknown" ? s3Preview(collection, tokenIdStr) : null;
+  const imageUrl = await resolveS3Preview(collection, tokenIdStr);
 
   let timestampMs = Date.now();
   try {
@@ -2399,7 +2439,7 @@ async function postPieceRevealed(collection, tokenIdStr, txHash, blockNumber) {
         ``,
         `Auction is now live.`,
         ``,
-        `[View on 8NAP](${auctionViewLink(collection.name)})`,
+        `[View on 8NAP](${auctionViewLink(collection)})`,
         `Tx: https://etherscan.io/tx/${txHash}`,
       ].join("\n")
     )
@@ -2414,15 +2454,10 @@ async function postPieceRevealed(collection, tokenIdStr, txHash, blockNumber) {
 
 async function postBid(collection, tokenIdStr, bidder, amountWei, isFirstBid, txHash, blockNumber) {
 
-let imageUrl = null;
-if (tokenIdStr !== "unknown") {
-  const previewUrl = s3Preview(collection, tokenIdStr);
-  if (previewUrl) {
-    try {
-      if (await previewExists(previewUrl)) imageUrl = previewUrl;
-    } catch {}
+  let imageUrl = null;
+  if (tokenIdStr !== "unknown") {
+    imageUrl = await resolveS3Preview(collection, tokenIdStr);
   }
-}
 
   const bidderDisplay = await formatDisplayAddress(bidder);
   const amountEth = ethers.formatEther(amountWei);
@@ -2444,7 +2479,7 @@ if (tokenIdStr !== "unknown") {
         `Bidder: **${bidderDisplay}**`,
         `Amount: **${amountEth} ETH**`,
         ``,
-        `[View on 8NAP](${auctionViewLink(collection.name)})`,
+        `[View on 8NAP](${auctionViewLink(collection)})`,
         `Tx: https://etherscan.io/tx/${txHash}`,
       ].join("\n")
     )
@@ -2455,6 +2490,207 @@ if (tokenIdStr !== "unknown") {
 
   const channel = await client.channels.fetch(config.auctionChannelId);
   await rateLimiter.send(channel, { embeds: [embed] });
+}
+
+function logPosition(log) {
+  const n = Number(log?.logIndex ?? log?.index ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function positiveWeiString(value) {
+  try {
+    if (value === null || value === undefined) return null;
+    const wei = BigInt(value.toString());
+    return wei > 0n ? wei.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function positiveWeiFromCallResult(value) {
+  const direct = positiveWeiString(value);
+  if (direct) return direct;
+
+  if (!value || typeof value !== "object") return null;
+
+  for (const key of ["amount", "bidAmount", "highestBid", "highestBidAmount"]) {
+    const found = positiveWeiString(value[key]);
+    if (found) return found;
+  }
+
+  if (Array.isArray(value) && value.length === 1) {
+    return positiveWeiString(value[0]);
+  }
+  if (Array.isArray(value) && value.length >= 2 && ethers.isAddress(value[0])) {
+    return positiveWeiString(value[1]);
+  }
+
+  return null;
+}
+
+function bidAmountWeiFromParsedAuctionLog(parsed) {
+  if (parsed?.name !== "NewBidPlaced") return null;
+  return positiveWeiString(parsed.args?.bid?.amount);
+}
+
+async function recoverAuctionAmountFromReceipt(contract, settlementLog) {
+  let receipt;
+  try {
+    receipt = await provider.getTransactionReceipt(settlementLog.transactionHash);
+  } catch {
+    return null;
+  }
+
+  const receiptLogs = Array.isArray(receipt?.logs) ? [...receipt.logs] : [];
+  if (receiptLogs.length === 0) return null;
+
+  const settlementIndex = logPosition(settlementLog);
+  const contractAddress = safeLowercaseAddress(settlementLog.address);
+  let latestBidWei = null;
+
+  receiptLogs.sort((a, b) => logPosition(a) - logPosition(b));
+
+  for (const receiptLog of receiptLogs) {
+    if (safeLowercaseAddress(receiptLog?.address) !== contractAddress) continue;
+    if (logPosition(receiptLog) >= settlementIndex) break;
+
+    let parsed;
+    try {
+      parsed = contract.interface.parseLog(receiptLog);
+    } catch {
+      continue;
+    }
+
+    const amountWei = bidAmountWeiFromParsedAuctionLog(parsed);
+    if (amountWei) latestBidWei = amountWei;
+  }
+
+  return latestBidWei;
+}
+
+async function recoverAuctionAmountFromRecentBidEvents(collection, contract, settlementLog) {
+  const settlementBlock = Number(settlementLog.blockNumber);
+  if (!Number.isFinite(settlementBlock)) return null;
+
+  const configuredLookback = Number(collection?.auctionBidLookbackBlocks);
+  const lookbackBlocks = Number.isFinite(configuredLookback) && configuredLookback >= 0
+    ? Math.floor(configuredLookback)
+    : AUCTION_BID_LOOKBACK_BLOCKS;
+  if (lookbackBlocks <= 0) return null;
+
+  const fromBlock = Math.max(0, settlementBlock - lookbackBlocks);
+  const settlementIndex = logPosition(settlementLog);
+  const topics = [[
+    contract.interface.getEvent("PieceRevealed").topicHash,
+    contract.interface.getEvent("NewBidPlaced").topicHash,
+  ]];
+
+  let sawRevealForCurrentWindow = false;
+  let latestBidWei = null;
+
+  try {
+    await scanLogsBounded({
+      address: collection.contractAddress,
+      fromBlock,
+      toBlock: settlementBlock,
+      topics,
+      maxRange: HOLDERS_MAX_BLOCK_RANGE,
+      onLogs: async (logs) => {
+        for (const log of logs) {
+          if (Number(log.blockNumber) === settlementBlock && logPosition(log) >= settlementIndex) {
+            return false;
+          }
+
+          let parsed;
+          try {
+            parsed = contract.interface.parseLog(log);
+          } catch {
+            continue;
+          }
+
+          if (parsed.name === "PieceRevealed") {
+            sawRevealForCurrentWindow = true;
+            latestBidWei = null;
+            continue;
+          }
+
+          const amountWei = bidAmountWeiFromParsedAuctionLog(parsed);
+          if (amountWei) latestBidWei = amountWei;
+        }
+
+        return true;
+      },
+    });
+  } catch (e) {
+    console.error(
+      `[auction] bid lookback failed collection=${collection.name} tx=${settlementLog.transactionHash}:`,
+      e?.message || e
+    );
+    return null;
+  }
+
+  return sawRevealForCurrentWindow ? latestBidWei : null;
+}
+
+async function recoverAuctionAmountFromContractState(contract, tokenIdStr, blockNumber) {
+  const n = Number(blockNumber);
+  const blockTag = Number.isFinite(n) ? Math.max(0, n - 1) : undefined;
+  const overrides = blockTag !== undefined ? { blockTag } : {};
+  let tokenId = null;
+  try {
+    tokenId = tokenIdStr !== "unknown" ? BigInt(tokenIdStr) : null;
+  } catch {
+    tokenId = null;
+  }
+
+  const calls = [
+    () => contract.highestBid(overrides),
+    () => contract.highestBidAmount(overrides),
+    () => contract.currentBid(overrides),
+    () => contract.winningBid(overrides),
+    () => contract.lastBid(overrides),
+    ...(tokenId == null ? [] : [
+      () => contract.bids(tokenId, overrides),
+      () => contract.tokenBids(tokenId, overrides),
+    ]),
+  ];
+
+  for (const call of calls) {
+    try {
+      const amountWei = positiveWeiFromCallResult(await call());
+      if (amountWei) return amountWei;
+    } catch {}
+  }
+
+  return null;
+}
+
+async function recoverAuctionAmountFromTxValue(txHash) {
+  try {
+    const tx = await provider.getTransaction(txHash);
+    return positiveWeiString(tx?.value);
+  } catch {
+    return null;
+  }
+}
+
+async function recoverAuctionAmountWei(collection, contract, settlementLog, tokenIdStr, cachedAmountWeiStr) {
+  const cachedAmountWei = positiveWeiString(cachedAmountWeiStr);
+  if (cachedAmountWei) return cachedAmountWei;
+
+  const receiptAmountWei = await recoverAuctionAmountFromReceipt(contract, settlementLog);
+  if (receiptAmountWei) return receiptAmountWei;
+
+  const recentEventAmountWei = await recoverAuctionAmountFromRecentBidEvents(collection, contract, settlementLog);
+  if (recentEventAmountWei) return recentEventAmountWei;
+
+  const contractStateAmountWei = await recoverAuctionAmountFromContractState(contract, tokenIdStr, settlementLog.blockNumber);
+  if (contractStateAmountWei) return contractStateAmountWei;
+
+  const txValueAmountWei = await recoverAuctionAmountFromTxValue(settlementLog.transactionHash);
+  if (txValueAmountWei) return txValueAmountWei;
+
+  return "0";
 }
 
 // =========================
@@ -2743,15 +2979,13 @@ if (!isAuction) {
         ? freshState.currentAuctionTokenId
         : tokenIdStr;
 
-    // amount: prefer last bid we observed for that token, fallback to tx.value (often 0)
-    let amountWeiStr = freshState.lastBidWeiByToken[resolvedTokenIdStr] || null;
-    if (!amountWeiStr) {
-      try {
-        const tx = await provider.getTransaction(log.transactionHash);
-        if (tx?.value != null) amountWeiStr = tx.value.toString();
-      } catch {}
-    }
-    if (!amountWeiStr) amountWeiStr = "0";
+    const amountWeiStr = await recoverAuctionAmountWei(
+      collection,
+      contract,
+      log,
+      resolvedTokenIdStr,
+      freshState.lastBidWeiByToken[resolvedTokenIdStr] || null
+    );
 
     // store pending by the REAL auction token id
     freshState.pendingAuctions[resolvedTokenIdStr] = {

@@ -122,7 +122,9 @@
       "artist": "Ren",
       "standard": "erc721",
       "isAuction": true,
-      "previewS3Id": 126,
+      "previewS3Id": 180,
+      "previewSize": "large",
+      "collectionUrl": "https://8nap.art/collection/relics-of-a-fractured-horizon",
       "contractAddress": "0xb86CC4Be9a0b4Dea3B0F1622B3B470BC94Ea2C82",
       "tokenIdBase": 1
     },
