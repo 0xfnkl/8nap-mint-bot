@@ -136,6 +136,12 @@
       "previewS3Id": 107,
       "contractAddress": "0xD27Ca58bc4f70E95a7f193965AE60ffCE0D46A87",
       "tokenIdBase": 1
+    },
+    {
+      "name": "Digital Mythology: Editions",
+      "artist": "Various Artists",
+      "standard": "erc1155",
+      "contractAddress": "0x6b1479a88695de864940e77477811205a3d52388"
     }
   ]
 }
