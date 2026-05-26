@@ -1,6 +1,15 @@
 {
   "discordChannelId": "1445238979937964154",
   "auctionChannelId": "1445850576255451367",
+  "mediaPosterBaseUrl": "https://raw.githubusercontent.com/0xfnkl/8nap-mint-bot/main/media-posters",
+  "mediaPosters": {
+    "0x6b1479a88695de864940e77477811205a3d52388": {
+      "0": "0.png",
+      "1": "1.png",
+      "3": "3.png",
+      "4": "4.png"
+    }
+  },
   "sales": {
     "enabled": true,
     "discordChannelId": "1432785617657401528",

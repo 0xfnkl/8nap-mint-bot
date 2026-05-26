@@ -118,6 +118,39 @@ function validateConfig(cfg) {
     errors.push("auctionChannelId is required and must be a non-empty string.");
   }
 
+  if (cfg?.mediaPosterBaseUrl !== undefined && !isNonEmptyString(cfg.mediaPosterBaseUrl)) {
+    errors.push("mediaPosterBaseUrl must be a non-empty string when provided.");
+  }
+
+  if (cfg?.mediaPosters !== undefined) {
+    if (!cfg.mediaPosters || typeof cfg.mediaPosters !== "object" || Array.isArray(cfg.mediaPosters)) {
+      errors.push("mediaPosters must be an object when provided.");
+    } else {
+      for (const [contractAddress, tokenMap] of Object.entries(cfg.mediaPosters)) {
+        const where = `mediaPosters.${contractAddress}`;
+
+        if (!isNonEmptyString(contractAddress)) {
+          errors.push("mediaPosters contract keys must be non-empty strings.");
+          continue;
+        }
+
+        if (!tokenMap || typeof tokenMap !== "object" || Array.isArray(tokenMap)) {
+          errors.push(`${where} must be an object.`);
+          continue;
+        }
+
+        for (const [tokenId, filename] of Object.entries(tokenMap)) {
+          if (!isNonEmptyString(tokenId)) {
+            errors.push(`${where} token keys must be non-empty strings.`);
+          }
+          if (!isNonEmptyString(filename)) {
+            errors.push(`${where}.${tokenId} must be a non-empty string.`);
+          }
+        }
+      }
+    }
+  }
+
   if (!Array.isArray(cfg?.collections)) {
     errors.push("collections is required and must be an array.");
   } else {
@@ -884,7 +917,7 @@ async function loadSaleRenderMetadata(collection, sale) {
   const contractAddress = safeLowercaseAddress(sale?.contract || collection?.contractAddress);
 
   if (!tokenId || !/^\d+$/.test(tokenId) || !contractAddress) {
-    return { artworkTitle: "", imageUrl: null };
+    return { artworkTitle: "", imageUrl: null, videoUrl: null };
   }
 
   let contract = null;
@@ -893,17 +926,19 @@ async function loadSaleRenderMetadata(collection, sale) {
   } else if (standard === "erc1155") {
     contract = new ethers.Contract(contractAddress, ERC1155_ABI, provider);
   } else {
-    return { artworkTitle: "", imageUrl: null };
+    return { artworkTitle: "", imageUrl: null, videoUrl: null };
   }
 
   try {
     const metadata = await retryAsync(() => loadMetadata(standard, contract, BigInt(tokenId)));
+    const media = await resolveDiscordMedia(metadata, contractAddress, tokenId);
     return {
       artworkTitle: safeString(metadata?.name).trim(),
-      imageUrl: isNonEmptyString(metadata?.image) ? normalizeUri(metadata.image) : null,
+      imageUrl: media.imageUrl,
+      videoUrl: media.videoUrl,
     };
   } catch {
-    return { artworkTitle: "", imageUrl: null };
+    return { artworkTitle: "", imageUrl: null, videoUrl: null };
   }
 }
 
@@ -925,7 +960,7 @@ async function postSale(collection, sale) {
   const buyerDisplay = buyerWallet ? await formatDisplayAddress(buyerWallet) : "unknown";
 
   const priceLine = await formatSalePriceLine(sale);
-  const { artworkTitle, imageUrl } = await loadSaleRenderMetadata(collection, sale);
+  const { artworkTitle, imageUrl, videoUrl } = await loadSaleRenderMetadata(collection, sale);
 
   let timestampMs = Date.now();
   const blockNumber = Number(blockNumberText);
@@ -955,6 +990,10 @@ async function postSale(collection, sale) {
     )
     .setTimestamp(new Date(timestampMs))
     .setFooter({ text: safeString(collection?.name).trim() || "Sales" });
+
+  if (videoUrl) {
+    embed.addFields({ name: "Media", value: `[View video](${videoUrl})`, inline: false });
+  }
 
   if (imageUrl) embed.setImage(imageUrl);
 
@@ -2130,6 +2169,162 @@ function normalizeUri(uri) {
   return uri;
 }
 
+const DISCORD_EMBED_IMAGE_CONTENT_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+const DISCORD_VIDEO_CONTENT_TYPES = new Set([
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+]);
+
+const DISCORD_EMBED_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+const DISCORD_VIDEO_EXTENSIONS = [".mp4", ".webm", ".mov"];
+
+function classifyMediaContentType(contentType) {
+  const type = safeLowercaseString(String(contentType || "").split(";")[0]);
+
+  if (DISCORD_EMBED_IMAGE_CONTENT_TYPES.has(type)) return "image";
+  if (DISCORD_VIDEO_CONTENT_TYPES.has(type)) return "video";
+  return null;
+}
+
+function classifyMediaUrlByExtension(url) {
+  let pathname = "";
+  try {
+    pathname = new URL(url).pathname.toLowerCase();
+  } catch {
+    pathname = safeLowercaseString(url).split("?")[0].split("#")[0];
+  }
+
+  if (DISCORD_EMBED_IMAGE_EXTENSIONS.some((extension) => pathname.endsWith(extension))) {
+    return "image";
+  }
+  if (DISCORD_VIDEO_EXTENSIONS.some((extension) => pathname.endsWith(extension))) {
+    return "video";
+  }
+  return null;
+}
+
+async function detectRemoteMediaKind(url, fallbackKind = null) {
+  if (!isNonEmptyString(url)) return null;
+
+  const fallback = classifyMediaUrlByExtension(url) || fallbackKind;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+  try {
+    const res = await fetch(url, { method: "HEAD", signal: controller.signal });
+    const contentTypeKind = classifyMediaContentType(res.headers.get("content-type"));
+    return contentTypeKind || fallback;
+  } catch {
+    return fallback;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function appendMetadataMediaCandidate(candidates, rawValue, fallbackKind = null) {
+  if (Array.isArray(rawValue)) {
+    rawValue.forEach((value) => appendMetadataMediaCandidate(candidates, value, fallbackKind));
+    return;
+  }
+
+  if (isNonEmptyString(rawValue)) {
+    const normalized = normalizeUri(rawValue.trim());
+    if (isNonEmptyString(normalized)) candidates.push({ url: normalized, fallbackKind });
+    return;
+  }
+
+  if (rawValue && typeof rawValue === "object") {
+    appendMetadataMediaCandidate(
+      candidates,
+      rawValue.url || rawValue.uri || rawValue.src || rawValue.image || rawValue.animation_url,
+      fallbackKind
+    );
+  }
+}
+
+function metadataMediaCandidates(metadata) {
+  const candidates = [];
+  const fields = [
+    ["image", null],
+    ["image_url", null],
+    ["animation_url", "video"],
+    ["animationUrl", "video"],
+    ["animation", "video"],
+    ["media", null],
+  ];
+
+  for (const [field, fallbackKind] of fields) {
+    appendMetadataMediaCandidate(candidates, metadata?.[field], fallbackKind);
+  }
+
+  const uniqueCandidates = [];
+  const candidateByUrl = new Map();
+  for (const candidate of candidates) {
+    const existing = candidateByUrl.get(candidate.url);
+    if (!existing) {
+      candidateByUrl.set(candidate.url, candidate);
+      uniqueCandidates.push(candidate);
+      continue;
+    }
+
+    if (candidate.fallbackKind === "video") {
+      existing.fallbackKind = "video";
+    }
+  }
+  return uniqueCandidates;
+}
+
+function configuredMediaPosterUrl(contractAddress, tokenId) {
+  const contractAddressLower = safeLowercaseAddress(contractAddress);
+  const tokenIdStr = safeString(tokenId).trim();
+  const baseUrl = safeString(config?.mediaPosterBaseUrl).trim().replace(/\/+$/, "");
+
+  if (!contractAddressLower || !tokenIdStr || !baseUrl) return null;
+
+  const posterMaps = config?.mediaPosters || {};
+  const posterMap = posterMaps[contractAddressLower] || posterMaps[contractAddress];
+  const filename = safeString(posterMap?.[tokenIdStr]).trim().replace(/^\/+/, "");
+
+  if (!filename) return null;
+  return `${baseUrl}/${contractAddressLower}/${filename}`;
+}
+
+async function resolveDiscordMedia(metadata, contractAddress, tokenId) {
+  const candidates = metadataMediaCandidates(metadata);
+  const posterUrl = configuredMediaPosterUrl(contractAddress, tokenId);
+  let imageUrl = null;
+  let videoUrl = null;
+
+  const classified = await Promise.all(
+    candidates.map(async (candidate) => ({
+      url: candidate.url,
+      kind: await detectRemoteMediaKind(candidate.url, candidate.fallbackKind),
+    }))
+  );
+
+  for (const candidate of classified) {
+    if (!imageUrl && candidate.kind === "image") {
+      imageUrl = candidate.url;
+    }
+    if (!videoUrl && candidate.kind === "video") {
+      videoUrl = candidate.url;
+    }
+  }
+
+  if (!imageUrl && videoUrl && posterUrl) {
+    imageUrl = posterUrl;
+  }
+
+  return { imageUrl, videoUrl };
+}
+
 async function loadMetadata(standard, contract, tokenId) {
   try {
     let uri;
@@ -2323,6 +2518,7 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
 
   // Image + title
   let imageUrl = null;
+  let videoUrl = null;
   let title = `${collection.name} #${tokenIdStr}`;
 
   if (collection.isAuction === true) {
@@ -2330,7 +2526,9 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
   } else {
     const metadata = await retryAsync(() => loadMetadata(standard, contract, tokenId));
     title = metadata?.name || title;
-    if (metadata?.image) imageUrl = normalizeUri(metadata.image);
+    const media = await resolveDiscordMedia(metadata, collection.contractAddress, tokenIdStr);
+    imageUrl = media.imageUrl;
+    videoUrl = media.videoUrl;
   }
 
 // tx value (or override)
@@ -2412,6 +2610,10 @@ try {
     )
     .setTimestamp(new Date(timestampMs))
     .setFooter({ text: collection.name });
+
+  if (videoUrl) {
+    embed.addFields({ name: "Media", value: `[View video](${videoUrl})`, inline: false });
+  }
 
   if (imageUrl) embed.setImage(imageUrl);
 
