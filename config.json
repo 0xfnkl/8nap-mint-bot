@@ -110,6 +110,12 @@
         "artist": "8NAP ART",
         "standard": "erc721",
         "contractAddress": "0xabcf18bf1937e3d7bac7ac743b7829ad6ad6d2ca"
+      },
+      {
+        "name": "Digital Mythology: Editions",
+        "artist": "Various Artists",
+        "standard": "erc1155",
+        "contractAddress": "0x6b1479a88695de864940e77477811205a3d52388"
       }
     ]
   },
