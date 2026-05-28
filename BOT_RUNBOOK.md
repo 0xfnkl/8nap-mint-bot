@@ -220,6 +220,20 @@ Likely causes:
 Recommended fix:
 - disconnect and reconnect GitHub source for the service
 
+## Problem: video NFT Discord post has no image
+
+Check:
+1. Confirm whether `metadata.image` or `animation_url` is actually a video URL.
+2. Confirm a poster image exists at `media-posters/<lowercase-contract-address>/<token-id>.<ext>`.
+3. Confirm `config.json` has a matching `mediaPosters` entry for that contract/token ID.
+4. Confirm `mediaPosterBaseUrl` points to the raw GitHub `media-posters` path.
+5. Confirm the poster file was committed and pushed to `main`.
+6. Open the raw GitHub poster URL directly to confirm it is reachable.
+7. If no poster exists, the bot should still post the mint/sale, but it may only show the video link fallback.
+
+Review reminder:
+- When adding poster files, make sure both `config.json` and the poster image files are staged and committed together. Do not commit config pointing to poster files that are not yet in the repo.
+
 ---
 
 ## Operational Guardrails for Codex

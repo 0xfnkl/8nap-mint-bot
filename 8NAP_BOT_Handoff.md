@@ -23,6 +23,7 @@ Redeploy trigger after Railway initialization stall.
 - `config.json`             Discord channel IDs + collections list
 - `package.json`            Dependencies, main file
 - `package-lock.json`       Locked dependency versions
+- `media-posters/`          Repo-hosted poster images for video NFT Discord embeds
 - `scripts/review-diff.sh`  Generates `current-diff.md` for external review
 - `.env`                    Local only (NOT committed)
 - `.github/copilot-instructions.md` (optional notes)
@@ -45,6 +46,8 @@ Railway runs Node (Railpack/Nixpacks). No custom start command is set. Recommend
 Top-level fields:
 - `discordChannelId`        Discord channel for mint posts
 - `auctionChannelId`        Discord channel for auction posts
+- `mediaPosterBaseUrl`      Optional base raw URL for Discord poster images
+- `mediaPosters`            Optional contract/token poster filename map for video NFT media
 - `collections[]` list entries:
   - `name`
   - `artist`
@@ -52,6 +55,39 @@ Top-level fields:
   - `contractAddress`
 
 To add/remove a collection: edit `config.json`, commit, deploy.
+
+---
+
+## Discord media rendering for video NFTs
+Mint and sales Discord embeds use shared media resolution logic for NFT media.
+
+- Discord embed images should only receive actual image URLs.
+- Video metadata should not be passed directly to `embed.setImage(...)`.
+- The helper checks common metadata fields including `image`, `image_url`, `animation_url`, `animationUrl`, `animation`, and `media`.
+- If metadata resolves to a real image, the bot uses it in `embed.setImage(...)`.
+- If metadata resolves to video and a configured poster exists, the bot uses the poster image in `embed.setImage(...)`.
+- If video media exists, the bot may add a `Media: View video` field.
+- If no valid image and no poster exists, the bot still posts the mint/sale and falls back to video link behavior.
+
+Poster files live in:
+
+```text
+media-posters/<lowercase-contract-address>/<token-id>.<ext>
+```
+
+`config.json` uses:
+- `mediaPosterBaseUrl`: raw base URL for poster images
+- `mediaPosters`: lowercase contract address -> token ID -> poster filename
+
+The final poster URL is:
+
+```text
+<mediaPosterBaseUrl>/<lowercase-contract-address>/<filename>
+```
+
+This is presentation-only. It does not affect ledger rows, mint detection, sales detection, polling, or persisted state.
+
+For future video tokens, add a poster file and a matching `mediaPosters` entry. If token metadata already provides a real image URL, no poster is needed.
 
 ---
 

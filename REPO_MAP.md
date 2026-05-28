@@ -30,6 +30,8 @@ This file currently contains:
 - ledger helpers
 - marketplace matchers
 - Discord posting helpers
+- shared Discord media resolution helpers for mint and sales embeds
+- poster override support for video NFT media
 
 Because this file is large, changes should be narrow and well targeted.
 
@@ -42,6 +44,8 @@ Holds:
 - sales-monitored collections
 - collection metadata
 - feature/config toggles used at runtime
+- optional `mediaPosterBaseUrl`
+- optional `mediaPosters` map for video NFT poster images
 
 Important:
 - mint monitoring config and sales monitoring config are not the same thing
@@ -57,6 +61,10 @@ Includes the diff review helper script entry:
 ## `scripts/review-diff.sh`
 
 Generates `current-diff.md` for external code review before commit/push.
+
+## `media-posters/`
+
+Repo-hosted poster images for video NFTs, organized by lowercase contract address and token ID.
 
 ## `8NAP_BOT_Handoff.md`
 
