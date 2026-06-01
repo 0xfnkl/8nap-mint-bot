@@ -1726,16 +1726,24 @@ async function handleSalesFastForwardCommand(interaction) {
 
   const collectionInput = interaction.options.getString("collection", true);
   const confirm = interaction.options.getString("confirm", true);
-  if (confirm !== "SKIP_UNCHECKED_SALES") {
+  if (safeString(confirm).trim().toLowerCase() !== "yes") {
     await interaction.editReply({
-      content: "Refused. Confirmation must exactly equal `SKIP_UNCHECKED_SALES`.",
+      content: "Refused. Confirmation must be `yes`.",
     });
     return;
   }
 
-  const collection = findSalesCollectionByInput(collectionInput);
-  if (!collection) {
+  const requestedAll = safeString(collectionInput).trim().toLowerCase() === "all";
+  const collections = requestedAll
+    ? salesCollectionsConfig()
+    : [findSalesCollectionByInput(collectionInput)].filter(Boolean);
+
+  if (!requestedAll && collections.length === 0) {
     await interaction.editReply({ content: `No sales-monitored collection matched "${collectionInput}".` });
+    return;
+  }
+  if (collections.length === 0) {
+    await interaction.editReply({ content: "No sales-monitored collections are configured." });
     return;
   }
 
@@ -1746,23 +1754,38 @@ async function handleSalesFastForwardCommand(interaction) {
     return;
   }
 
-  const collectionKey = salesCollectionKey(collection);
-  const snapshot = salesStateSnapshot(collection, safeHead);
-  const state = snapshot.state;
-  const oldCursor = snapshot.effectiveLastProcessedBlock;
-  const targetCursor = Math.max(0, safeHead - SALES_LOOKBACK_BLOCKS);
-  const newCursor = Math.max(oldCursor, targetCursor);
-  const skippedBlockCount = Math.max(0, newCursor - oldCursor);
-  state.lastProcessedBlock = newCursor;
-  saveSalesState(collectionKey, state);
+  const rows = [
+    "collection | oldCursor | newCursor | safeHead | skippedBlockCount",
+    "---------- | --------- | --------- | -------- | -----------------",
+  ];
+
+  for (const collection of collections) {
+    const collectionKey = salesCollectionKey(collection);
+    const snapshot = salesStateSnapshot(collection, safeHead);
+    const state = snapshot.state;
+    const oldCursor = snapshot.effectiveLastProcessedBlock;
+    const targetCursor = Math.max(0, safeHead - SALES_LOOKBACK_BLOCKS);
+    const newCursor = Math.max(oldCursor, targetCursor);
+    const skippedBlockCount = Math.max(0, newCursor - oldCursor);
+    state.lastProcessedBlock = newCursor;
+    saveSalesState(collectionKey, state);
+
+    rows.push([
+      salesCollectionName(collection).slice(0, 28),
+      oldCursor,
+      newCursor,
+      safeHead,
+      skippedBlockCount,
+    ].join(" | "));
+  }
 
   const message = [
-    `Sales fast-forward completed for **${salesCollectionName(collection)}**.`,
-    `Unchecked sales blocks were skipped.`,
-    `oldCursor=${oldCursor}`,
-    `newCursor=${newCursor}`,
-    `safeHead=${safeHead}`,
-    `skippedBlockCount=${skippedBlockCount}`,
+    `Sales fast-forward completed for **${requestedAll ? "ALL sales collections" : salesCollectionName(collections[0])}**.`,
+    "Unchecked sales blocks were skipped.",
+    "",
+    "```",
+    ...rows,
+    "```",
   ].join("\n");
 
   const alertChannelId = safeString(config?.sales?.salesAlertChannelId).trim() || "1432785087828852776";
@@ -3883,18 +3906,18 @@ async function registerCommands() {
       .toJSON(),
     new SlashCommandBuilder()
       .setName("salesfastforward")
-      .setDescription("Emergency-only: skip unchecked sales blocks for one collection")
+      .setDescription("Emergency-only: skip unchecked sales blocks for one or all collections")
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
       .addStringOption((opt) =>
         opt
           .setName("collection")
-          .setDescription("Collection name or contract address")
+          .setDescription("Collection name, contract address, or ALL")
           .setRequired(true)
       )
       .addStringOption((opt) =>
         opt
           .setName("confirm")
-          .setDescription("Must exactly equal SKIP_UNCHECKED_SALES")
+          .setDescription("Type yes to confirm.")
           .setRequired(true)
       )
       .toJSON(),

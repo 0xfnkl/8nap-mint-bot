@@ -61,7 +61,7 @@ The bot's goal is to record sales as they happen while preserving no-skip cursor
 
 If the bot is down long enough for a sales cursor to lag, operators should use `/salescatchup` to process sequential windows without skipping.
 
-`/salesfastforward` exists only as an emergency operator action and intentionally skips unchecked sales blocks after exact confirmation.
+`/salesfastforward` exists only as an emergency operator action and intentionally skips unchecked sales blocks after confirmation text `yes`, case-insensitive. It can target one collection, or all sales-monitored collections with collection `ALL`.
 
 ---
 
@@ -274,7 +274,7 @@ When extending the sales system:
 - do not broaden marketplace scope casually
 - do not add historical backfill as default runtime behavior
 - prefer `/salescatchup` for lag remediation because it catches up sequentially without skipping
-- treat `/salesfastforward` as emergency-only because it skips unchecked sales blocks
+- treat `/salesfastforward` as emergency-only because it skips unchecked sales blocks; confirmation is `yes`, case-insensitive
 - keep unsupported paths explicitly unsupported until intentionally implemented
 
 ---

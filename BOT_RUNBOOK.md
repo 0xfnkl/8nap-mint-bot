@@ -226,8 +226,9 @@ Preferred recovery:
 
 Emergency-only recovery:
 - Run `/salesfastforward` only when willing to skip unchecked sales blocks.
-- It requires exact confirmation text: `SKIP_UNCHECKED_SALES`.
-- It only changes sales state for the selected collection and posts an audit message to admin channel `1432785087828852776`.
+- It requires confirmation text `yes`, case-insensitive.
+- Use collection `ALL` to fast-forward every sales-monitored collection.
+- It only changes sales state for the selected collection, or all sales-monitored collections when `ALL` is used, and posts an audit message to admin channel `1432785087828852776`.
 
 `SALES_MAX_BLOCK_RANGE` must be high enough to cover expected blocks produced between sales polls. With a 30 minute `SALES_POLL_MS`, a 10-block range will naturally fall behind; the default 250-block range is intended to keep up with normal Ethereum block production while leaving buffer.
 
