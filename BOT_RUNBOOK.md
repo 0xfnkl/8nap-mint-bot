@@ -148,7 +148,7 @@ You should also see:
 Typical healthy signals:
 - `[startup:startPolling] before initializeSalesStateNearHead collection=...`
 - `[startup:startPolling] before first immediate pollSalesOnce()`
-- `[sales] checking collection=... fromBlock=... toBlock=... safeHead=...`
+- `[sales] checking collection=... fromBlock=... toBlock=... safeHead=... lagBlocks=...`
 - `[sales] cursor advance collection=...`
 - `[startup:startPolling] recurring sales poll interval started`
 
@@ -171,10 +171,12 @@ Sales behavior is intentionally separate from mint behavior.
 - live monitoring only
 - no default historical backfill
 - cursor initializes near head
-- cursor may be fast-forwarded near head if stale
+- existing cursors advance sequentially and do not skip unchecked blocks by default
+- sales polling uses `SALES_MAX_BLOCK_RANGE`, default `250`
 - onchain ERC-721 sales detection is the runtime path for supported sale shapes
 - narrow onchain ERC-1155 sales detection supports single-token-ID sale transactions
 - Discord posting should occur for newly detected sales
+- `/status` includes sales cursor, safe head, lag, and lag status
 
 ---
 
@@ -202,13 +204,32 @@ First determine which of these is true:
 For live monitoring, first inspect:
 - current sales block window
 - cursor state
+- `/status` sales monitoring health
 - whether collection is sales-monitored
 - whether sale shape is supported by the current onchain path
 
 ## Problem: sales cursor is far behind head
 
-If live monitoring is intended, sales state should initialize or fast-forward near head.
-If it is crawling from old history, something is wrong with sales state initialization or persisted state handling.
+Use `/status` to inspect each sales-monitored collection's `salesCursor`, `safeHead`, `lagBlocks`, and status.
+
+Lag thresholds:
+- `SALES_LAG_ALERT_BLOCKS=500`
+- `SALES_HARD_LAG_ALERT_BLOCKS=2000`
+
+Lag alerts post to admin channel `1432785087828852776`. The alert means no blocks have been skipped; the sales cursor is behind and the bot is still checking sequentially.
+
+Preferred recovery:
+- Run `/salescatchup` to process sales ranges sequentially without skipping.
+- Use `collection` to target one collection, or omit it to catch up all sales-monitored collections.
+- Use `max_batches` to bound RPC work. Each batch uses `SALES_MAX_BLOCK_RANGE`.
+- Use `dry_run: true` to preview ranges without mutating sales state or posting sales.
+
+Emergency-only recovery:
+- Run `/salesfastforward` only when willing to skip unchecked sales blocks.
+- It requires exact confirmation text: `SKIP_UNCHECKED_SALES`.
+- It only changes sales state for the selected collection and posts an audit message to admin channel `1432785087828852776`.
+
+`SALES_MAX_BLOCK_RANGE` must be high enough to cover expected blocks produced between sales polls. With a 30 minute `SALES_POLL_MS`, a 10-block range will naturally fall behind; the default 250-block range is intended to keep up with normal Ethereum block production while leaving buffer.
 
 ## Problem: Railway deploys only when manually triggered
 

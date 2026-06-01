@@ -13,6 +13,7 @@
   "sales": {
     "enabled": true,
     "discordChannelId": "1432785617657401528",
+    "salesAlertChannelId": "1432785087828852776",
     "collections": [
       {
         "name": "Issues",

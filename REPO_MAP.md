@@ -98,6 +98,8 @@ Purpose:
 Typical pieces involved:
 - sales state initialization near head
 - `pollSalesOnce()`
+- sales lag status in `/status`
+- admin-only `/salescatchup` and `/salesfastforward`
 - generic onchain sales detection path
 - processed-state dedupe
 - Discord sale posting
@@ -106,6 +108,7 @@ Guardrail:
 - do not assume historical backfill is intended
 - do not assume Alchemy is fully trustworthy
 - preserve working onchain sales behavior
+- use `/salescatchup` for no-skip lag recovery; `/salesfastforward` is emergency-only and skips unchecked sales blocks
 
 ---
 

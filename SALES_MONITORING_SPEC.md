@@ -23,6 +23,7 @@ Primary goals:
 - detect supported live sales reliably
 - post newly detected sales to Discord
 - persist enough state to avoid duplicate posts
+- keep existing sales cursors no-skip by default
 - stay narrow and debuggable
 
 ---
@@ -48,17 +49,38 @@ For each collection in `config.sales.collections`:
 
 Sales monitoring starts near the current safe head.
 
-If state is missing or stale, the sales cursor is initialized or fast-forwarded near head instead of crawling through old history.
+If sales state is missing, the sales cursor is initialized near head.
+
+If an existing sales cursor is behind, normal polling continues sequentially from that cursor. It does not skip unchecked blocks.
 
 ### Why
 
-The bot's goal is to record sales as they happen, not backfill weeks or months of old sales before becoming useful.
+The bot's goal is to record sales as they happen while preserving no-skip cursor advancement for already-initialized sales state.
 
 ### Consequence
 
-If the bot is down for a long time, old missed sales outside the live near-head window are intentionally skipped.
+If the bot is down long enough for a sales cursor to lag, operators should use `/salescatchup` to process sequential windows without skipping.
 
-That is acceptable for this system's intended use.
+`/salesfastforward` exists only as an emergency operator action and intentionally skips unchecked sales blocks after exact confirmation.
+
+---
+
+## Polling Range and Lag
+
+Sales polling uses `SALES_MAX_BLOCK_RANGE`, default `250`, instead of the mint `MAX_BLOCK_RANGE`.
+
+`SALES_MAX_BLOCK_RANGE` must be high enough to cover expected blocks produced between sales polls. For example, with a 30 minute `SALES_POLL_MS`, Ethereum commonly produces roughly 150 blocks, so a 250-block sales range leaves buffer while keeping RPC requests bounded.
+
+Sales lag is measured as:
+
+`safeHead - salesCursor`
+
+Lag status:
+- `OK` when lag is at or below `SALES_LAG_ALERT_BLOCKS`, default `500`
+- `BEHIND` when lag is above `SALES_LAG_ALERT_BLOCKS`
+- `CRITICAL` when lag is above `SALES_HARD_LAG_ALERT_BLOCKS`, default `2000`
+
+Lag alerts post to admin channel `1432785087828852776`. Alerts explain that no blocks have been skipped and recommend `/salescatchup` before the emergency-only `/salesfastforward`.
 
 ---
 
@@ -213,6 +235,7 @@ Operational logs should remain useful but not noisy.
 Keep:
 - poll start/skip
 - checked block window
+- sales lag in checked block window logs
 - cursor advance
 - onchain candidate counts
 - matched candidate counts
@@ -231,6 +254,8 @@ Sales-monitored collections belong in:
 
 This is separate from mint monitoring configuration.
 
+`config.sales.salesAlertChannelId` controls where sales lag and fast-forward audit messages are posted. The current admin channel is `1432785087828852776`.
+
 A collection may be:
 - mint-monitored
 - sales-monitored
@@ -248,6 +273,8 @@ When extending the sales system:
 - preserve working ERC-721 onchain behavior
 - do not broaden marketplace scope casually
 - do not add historical backfill as default runtime behavior
+- prefer `/salescatchup` for lag remediation because it catches up sequentially without skipping
+- treat `/salesfastforward` as emergency-only because it skips unchecked sales blocks
 - keep unsupported paths explicitly unsupported until intentionally implemented
 
 ---

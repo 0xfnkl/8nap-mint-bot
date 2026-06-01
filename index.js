@@ -2,7 +2,7 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, REST, Routes, SlashCommandBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 const { ethers } = require("ethers");
 
 // =========================
@@ -27,6 +27,7 @@ function disabledSalesConfig() {
   return {
     enabled: false,
     discordChannelId: "",
+    salesAlertChannelId: "",
     collections: [],
   };
 }
@@ -46,6 +47,10 @@ function validateOptionalSalesConfig(cfg) {
 
     if (!isNonEmptyString(sales.discordChannelId)) {
       errors.push("sales.discordChannelId is required and must be a non-empty string.");
+    }
+
+    if (sales.salesAlertChannelId !== undefined && !isNonEmptyString(sales.salesAlertChannelId)) {
+      errors.push("sales.salesAlertChannelId must be a non-empty string when provided.");
     }
 
     if (!Array.isArray(sales.collections)) {
@@ -96,6 +101,9 @@ function validateOptionalSalesConfig(cfg) {
   cfg.sales = {
     ...sales,
     discordChannelId: sales.discordChannelId.trim(),
+    salesAlertChannelId: isNonEmptyString(sales.salesAlertChannelId)
+      ? sales.salesAlertChannelId.trim()
+      : "1432785087828852776",
     collections: sales.collections.map((collection) => ({
       ...collection,
       standard: collection.standard.toLowerCase(),
@@ -256,6 +264,10 @@ const MINT_POLL_MS = process.env.MINT_POLL_MS !== undefined
 const SALES_POLL_MS = parseValidatedIntegerEnv("SALES_POLL_MS", 1800000, 1000);
 const CONFIRMATIONS = parseValidatedIntegerEnv("CONFIRMATIONS", 2, 0);     // reorg safety
 const MAX_BLOCK_RANGE = parseValidatedIntegerEnv("MAX_BLOCK_RANGE", 5, 1); // <= 10 for Alchemy free constraints
+const SALES_MAX_BLOCK_RANGE = parseValidatedIntegerEnv("SALES_MAX_BLOCK_RANGE", 250, 1);
+const SALES_LAG_ALERT_BLOCKS = parseValidatedIntegerEnv("SALES_LAG_ALERT_BLOCKS", 500, 1);
+const SALES_HARD_LAG_ALERT_BLOCKS = parseValidatedIntegerEnv("SALES_HARD_LAG_ALERT_BLOCKS", 2000, 1);
+const SALES_LOOKBACK_BLOCKS = parseValidatedIntegerEnv("SALES_LOOKBACK_BLOCKS", 50, 0);
 const AUCTION_BID_LOOKBACK_BLOCKS = parseValidatedIntegerEnv("AUCTION_BID_LOOKBACK_BLOCKS", 10000, 0);
 const HOLDERS_MAX_BLOCK_RANGE = Math.max(MAX_BLOCK_RANGE, 5000);
 console.log("[startup] numeric env vars validated");
@@ -290,6 +302,8 @@ const STATE_DIR = path.join(DATA_DIR, "state");
 if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR);
 const SALES_STATE_DIR = path.join(STATE_DIR, "sales");
 if (!fs.existsSync(SALES_STATE_DIR)) fs.mkdirSync(SALES_STATE_DIR, { recursive: true });
+const SALES_ALERT_STATE_PATH = path.join(STATE_DIR, "sales_lag_alert_state.json");
+const SALES_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 // Persisted ETH/USD cache (for Discord display only, not used in the ledger)
 const ETH_PRICE_CACHE_PATH = path.join(STATE_DIR, "eth_price_usd.json");
@@ -427,6 +441,22 @@ function saveSalesState(collectionKey, state) {
   if (!state.processed || typeof state.processed !== "object") state.processed = {};
 
   fs.writeFileSync(salesStateFileFor(collectionKey), JSON.stringify(state, null, 2));
+}
+
+function loadSalesAlertState() {
+  try {
+    if (!fs.existsSync(SALES_ALERT_STATE_PATH)) return { collections: {} };
+    const parsed = JSON.parse(fs.readFileSync(SALES_ALERT_STATE_PATH, "utf8"));
+    if (!parsed.collections || typeof parsed.collections !== "object") parsed.collections = {};
+    return parsed;
+  } catch {
+    return { collections: {} };
+  }
+}
+
+function saveSalesAlertState(state) {
+  if (!state.collections || typeof state.collections !== "object") state.collections = {};
+  fs.writeFileSync(SALES_ALERT_STATE_PATH, JSON.stringify(state, null, 2));
 }
 
 function seenKey(log) {
@@ -634,6 +664,48 @@ function supportsErc721SalesFallback(collection) {
 function supportsErc1155SalesDetection(collection) {
   return safeString(collection?.standard).trim().toLowerCase() === "erc1155" &&
     isNonEmptyString(collection?.contractAddress);
+}
+
+function salesCollectionKey(collection) {
+  const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
+  return safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
+}
+
+function salesCollectionName(collection) {
+  return safeString(collection?.name).trim() || "(unnamed sales collection)";
+}
+
+function salesLagStatus(lagBlocks) {
+  const lag = Math.max(0, Number(lagBlocks) || 0);
+  if (lag > SALES_HARD_LAG_ALERT_BLOCKS) return "CRITICAL";
+  if (lag > SALES_LAG_ALERT_BLOCKS) return "BEHIND";
+  return "OK";
+}
+
+function salesStateSnapshot(collection, safeHead) {
+  const collectionName = salesCollectionName(collection);
+  const collectionKey = salesCollectionKey(collection);
+  const state = loadSalesState(collectionKey);
+  const configuredStartBlock = Number.isInteger(collection.startBlock) && collection.startBlock >= 0
+    ? collection.startBlock
+    : 0;
+  const persistedLastProcessedBlock = Number(state.lastProcessedBlock || 0);
+  const effectiveLastProcessedBlock =
+    persistedLastProcessedBlock === 0 && configuredStartBlock > 0
+      ? Math.max(0, configuredStartBlock - 1)
+      : persistedLastProcessedBlock;
+  const lagBlocks = Math.max(0, Number(safeHead || 0) - effectiveLastProcessedBlock);
+
+  return {
+    collectionName,
+    collectionKey,
+    state,
+    persistedLastProcessedBlock,
+    effectiveLastProcessedBlock,
+    safeHead: Number(safeHead || 0),
+    lagBlocks,
+    status: salesLagStatus(lagBlocks),
+  };
 }
 
 function isEthLikeCurrencySymbol(symbol) {
@@ -1001,6 +1073,69 @@ async function postSale(collection, sale) {
   await rateLimiter.send(channel, { embeds: [embed] });
 }
 
+async function postSalesLagAlertIfNeeded(collection, snapshot) {
+  const status = snapshot?.status;
+  if (status !== "BEHIND" && status !== "CRITICAL") {
+    if (snapshot?.collectionKey) {
+      const alertState = loadSalesAlertState();
+      const previous = alertState.collections[snapshot.collectionKey] || {};
+      if (previous.level && previous.level !== "OK") {
+        alertState.collections[snapshot.collectionKey] = {
+          ...previous,
+          level: "OK",
+          lastRecoveredAt: Date.now(),
+          lagBlocks: snapshot.lagBlocks,
+          safeHead: snapshot.safeHead,
+          cursor: snapshot.effectiveLastProcessedBlock,
+        };
+        saveSalesAlertState(alertState);
+      }
+    }
+    return;
+  }
+
+  const alertChannelId = safeString(config?.sales?.salesAlertChannelId).trim() || "1432785087828852776";
+  if (!alertChannelId) return;
+
+  const alertState = loadSalesAlertState();
+  const previous = alertState.collections[snapshot.collectionKey] || {};
+  const now = Date.now();
+  const sameLevel = previous.level === status;
+  const lastAlertAt = Number(previous.lastAlertAt || 0);
+  if (sameLevel && now - lastAlertAt < SALES_ALERT_COOLDOWN_MS) return;
+
+  const severityText = status === "CRITICAL" ? "CRITICAL sales lag" : "Sales lag warning";
+  const content = [
+    `**${severityText}: ${snapshot.collectionName}**`,
+    `status: ${status}`,
+    `sales cursor: ${snapshot.effectiveLastProcessedBlock}`,
+    `safeHead: ${snapshot.safeHead}`,
+    `lagBlocks: ${snapshot.lagBlocks}`,
+    "",
+    "No blocks have been skipped. The sales cursor is behind and normal polling will continue checking sequential block ranges.",
+    "Recommended operator actions:",
+    "- Use `/salescatchup` to catch up without skipping.",
+    "- Use `/salesfastforward` only if willing to skip unchecked sales blocks.",
+  ].join("\n");
+
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    await rateLimiter.send(channel, { content });
+  } catch (e) {
+    console.error("[sales] lag alert post failed:", e?.message || e);
+    return;
+  }
+
+  alertState.collections[snapshot.collectionKey] = {
+    level: status,
+    lastAlertAt: now,
+    lagBlocks: snapshot.lagBlocks,
+    safeHead: snapshot.safeHead,
+    cursor: snapshot.effectiveLastProcessedBlock,
+  };
+  saveSalesAlertState(alertState);
+}
+
 async function findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock) {
   const boundedFromBlock = Math.max(0, Number(fromBlock) || 0);
   const boundedToBlock = Math.max(boundedFromBlock, Number(toBlock) || boundedFromBlock);
@@ -1287,6 +1422,113 @@ async function findErc1155OnchainSaleCandidatesInRange(collection, fromBlock, to
   return candidates;
 }
 
+async function processSalesCollectionRange(collection, fromBlock, toBlock, safeHead, options = {}) {
+  const dryRun = options.dryRun === true;
+  const persist = options.persist !== false && !dryRun;
+  const post = options.post !== false && !dryRun;
+  const collectionName = salesCollectionName(collection);
+  const collectionKey = salesCollectionKey(collection);
+  const erc721FallbackEligible = supportsErc721SalesFallback(collection);
+  const erc1155SalesEligible = supportsErc1155SalesDetection(collection);
+  const snapshot = salesStateSnapshot(collection, safeHead);
+  const currentState = snapshot.state;
+  const persistedLastProcessedBlock = snapshot.persistedLastProcessedBlock;
+  const effectiveLastProcessedBlock = snapshot.effectiveLastProcessedBlock;
+  const lagBlocks = snapshot.lagBlocks;
+
+  console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} lagBlocks=${lagBlocks}`);
+
+  if (fromBlock > safeHead) {
+    console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${persistedLastProcessedBlock} reason=no-new-blocks`);
+    return {
+      advanced: false,
+      oldCursor: effectiveLastProcessedBlock,
+      newCursor: effectiveLastProcessedBlock,
+      safeHead,
+      lagBefore: lagBlocks,
+      lagAfter: lagBlocks,
+      posted: 0,
+      normalized: 0,
+      rawCandidates: 0,
+    };
+  }
+
+  if (dryRun) {
+    return {
+      advanced: false,
+      oldCursor: effectiveLastProcessedBlock,
+      newCursor: effectiveLastProcessedBlock,
+      wouldProcessToBlock: toBlock,
+      safeHead,
+      lagBefore: lagBlocks,
+      lagAfter: lagBlocks,
+      posted: 0,
+      normalized: 0,
+      rawCandidates: 0,
+    };
+  }
+
+  const nextState = {
+    version: currentState.version,
+    lastProcessedBlock: effectiveLastProcessedBlock,
+    processed: { ...(currentState.processed || {}) },
+  };
+
+  let onchainRawCandidateCount = 0;
+  let normalizedSales = [];
+  if (erc721FallbackEligible) {
+    const onchainCandidates = await findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
+    onchainRawCandidateCount = onchainCandidates.length;
+    normalizedSales = onchainCandidates.flatMap((candidate) =>
+      normalizeErc721OnchainCandidateToSales(candidate, collection)
+    );
+    console.log(
+      `[sales:onchain] collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
+    );
+  } else if (erc1155SalesEligible) {
+    const onchainCandidates = await findErc1155OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
+    onchainRawCandidateCount = onchainCandidates.length;
+    normalizedSales = onchainCandidates.flatMap((candidate) =>
+      normalizeErc1155OnchainCandidateToSales(candidate, collection)
+    );
+    console.log(
+      `[sales:onchain:erc1155] collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
+    );
+  }
+  let newSalesCount = 0;
+
+  for (const sale of normalizedSales) {
+    const key = saleKeyFromRecord(sale);
+    if (nextState.processed[key]) continue;
+    if (post) await postSale(collection, sale);
+    nextState.processed[key] = true;
+    newSalesCount += 1;
+  }
+
+  console.log(
+    `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} lagBlocks=${lagBlocks} onchainRawCandidates=${onchainRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount}`
+  );
+
+  nextState.lastProcessedBlock = toBlock;
+  console.log(
+    `[sales] cursor advance collection=${collectionName} from=${effectiveLastProcessedBlock} to=${nextState.lastProcessedBlock}`
+  );
+
+  if (persist) saveSalesState(collectionKey, nextState);
+
+  return {
+    advanced: true,
+    oldCursor: effectiveLastProcessedBlock,
+    newCursor: nextState.lastProcessedBlock,
+    safeHead,
+    lagBefore: lagBlocks,
+    lagAfter: Math.max(0, Number(safeHead || 0) - nextState.lastProcessedBlock),
+    posted: newSalesCount,
+    normalized: normalizedSales.length,
+    rawCandidates: onchainRawCandidateCount,
+  };
+}
+
 async function pollSalesOnce() {
   const salesConfig = config?.sales;
   if (!salesConfig || salesConfig.enabled !== true) {
@@ -1310,78 +1552,21 @@ async function pollSalesOnce() {
   let advancedAny = false;
 
   for (const collection of collections) {
-    const collectionName = safeString(collection?.name).trim() || "(unnamed sales collection)";
-    const collectionKey = safeLowercaseAddress(collection?.contractAddress) || collectionName.toLowerCase();
-    const erc721FallbackEligible = supportsErc721SalesFallback(collection);
-    const erc1155SalesEligible = supportsErc1155SalesDetection(collection);
-    const currentState = loadSalesState(collectionKey);
-    const configuredStartBlock = Number.isInteger(collection.startBlock) && collection.startBlock >= 0
-      ? collection.startBlock
-      : 0;
-    const persistedLastProcessedBlock = Number(currentState.lastProcessedBlock || 0);
-    const effectiveLastProcessedBlock =
-      persistedLastProcessedBlock === 0 && configuredStartBlock > 0
-        ? Math.max(0, configuredStartBlock - 1)
-        : persistedLastProcessedBlock;
-    const fromBlock = effectiveLastProcessedBlock + 1;
-    const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);
-
-    console.log(`[sales] checking collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}`);
-
-    if (fromBlock > safeHead) {
-      console.log(`[sales] cursor unchanged collection=${collectionName} lastProcessedBlock=${persistedLastProcessedBlock} reason=no-new-blocks`);
-      continue;
-    }
-
-    const nextState = {
-      version: currentState.version,
-      lastProcessedBlock: persistedLastProcessedBlock,
-      processed: { ...(currentState.processed || {}) },
-    };
+    const collectionName = salesCollectionName(collection);
+    const snapshot = salesStateSnapshot(collection, safeHead);
+    const fromBlock = snapshot.effectiveLastProcessedBlock + 1;
+    const toBlock = Math.min(fromBlock + SALES_MAX_BLOCK_RANGE - 1, safeHead);
 
     try {
-      let onchainRawCandidateCount = 0;
-      let normalizedSales = [];
-      if (erc721FallbackEligible) {
-        const onchainCandidates = await findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
-        onchainRawCandidateCount = onchainCandidates.length;
-        normalizedSales = onchainCandidates.flatMap((candidate) =>
-          normalizeErc721OnchainCandidateToSales(candidate, collection)
-        );
-        console.log(
-          `[sales:onchain] collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
-        );
-      } else if (erc1155SalesEligible) {
-        const onchainCandidates = await findErc1155OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
-        onchainRawCandidateCount = onchainCandidates.length;
-        normalizedSales = onchainCandidates.flatMap((candidate) =>
-          normalizeErc1155OnchainCandidateToSales(candidate, collection)
-        );
-        console.log(
-          `[sales:onchain:erc1155] collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} candidateCount=${onchainCandidates.length} normalizedSales=${normalizedSales.length}`
+      if (snapshot.status !== "OK") {
+        console.warn(
+          `[sales] lag ${snapshot.status} collection=${collectionName} salesCursor=${snapshot.effectiveLastProcessedBlock} safeHead=${safeHead} lagBlocks=${snapshot.lagBlocks}`
         );
       }
-      let newSalesCount = 0;
+      await postSalesLagAlertIfNeeded(collection, snapshot);
 
-      for (const sale of normalizedSales) {
-        const key = saleKeyFromRecord(sale);
-        if (nextState.processed[key]) continue;
-        await postSale(collection, sale);
-        nextState.processed[key] = true;
-        newSalesCount += 1;
-      }
-
-      console.log(
-        `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} onchainRawCandidates=${onchainRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount}`
-      );
-
-      nextState.lastProcessedBlock = toBlock;
-      advancedAny = true;
-      console.log(
-        `[sales] cursor advance collection=${collectionName} from=${persistedLastProcessedBlock} to=${nextState.lastProcessedBlock}`
-      );
-
-      saveSalesState(collectionKey, nextState);
+      const result = await processSalesCollectionRange(collection, fromBlock, toBlock, safeHead);
+      if (result.advanced) advancedAny = true;
     } catch (e) {
       console.error(
         `[sales] poll failed collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}:`,
@@ -1436,6 +1621,161 @@ const rateLimiter = {
   },
 };
 
+function memberIsAdmin(interaction) {
+  return interaction?.memberPermissions?.has?.(PermissionFlagsBits.Administrator) === true;
+}
+
+function salesCollectionsConfig() {
+  return Array.isArray(config?.sales?.collections) ? config.sales.collections : [];
+}
+
+function findSalesCollectionByInput(value) {
+  const needle = safeString(value).trim().toLowerCase();
+  if (!needle) return null;
+  return salesCollectionsConfig().find((collection) => {
+    const name = salesCollectionName(collection).toLowerCase();
+    const contract = safeLowercaseAddress(collection?.contractAddress);
+    return name === needle || contract === needle;
+  }) || null;
+}
+
+async function handleSalesCatchupCommand(interaction) {
+  if (!memberIsAdmin(interaction)) {
+    await interaction.reply({ content: "Admin permission is required for `/salescatchup`.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const collectionInput = interaction.options.getString("collection");
+  const maxBatches = Math.max(1, interaction.options.getInteger("max_batches") || 10);
+  const dryRun = interaction.options.getBoolean("dry_run") === true;
+  const collections = collectionInput
+    ? [findSalesCollectionByInput(collectionInput)].filter(Boolean)
+    : salesCollectionsConfig();
+
+  if (collectionInput && collections.length === 0) {
+    await interaction.editReply({ content: `No sales-monitored collection matched "${collectionInput}".` });
+    return;
+  }
+  if (collections.length === 0) {
+    await interaction.editReply({ content: "No sales-monitored collections are configured." });
+    return;
+  }
+
+  const head = await provider.getBlockNumber();
+  const safeHead = head - CONFIRMATIONS;
+  if (safeHead <= 0) {
+    await interaction.editReply({ content: `Sales catch-up skipped: safeHead=${safeHead}.` });
+    return;
+  }
+
+  const reportRows = [
+    "collection | oldCursor | newCursor | safeHead | lagBefore | lagAfter | batches | posted",
+    "---------- | --------- | --------- | -------- | --------- | -------- | ------- | ------",
+  ];
+
+  for (const collection of collections) {
+    const before = salesStateSnapshot(collection, safeHead);
+    let cursor = before.effectiveLastProcessedBlock;
+    let batchesProcessed = 0;
+    let salesPosted = 0;
+
+    for (; batchesProcessed < maxBatches && cursor < safeHead; batchesProcessed++) {
+      const fromBlock = cursor + 1;
+      const toBlock = Math.min(fromBlock + SALES_MAX_BLOCK_RANGE - 1, safeHead);
+      const result = await processSalesCollectionRange(collection, fromBlock, toBlock, safeHead, { dryRun });
+      salesPosted += Number(result.posted || 0);
+      if (dryRun) {
+        cursor = toBlock;
+      } else {
+        cursor = Number(result.newCursor || cursor);
+      }
+    }
+
+    const lagAfter = Math.max(0, safeHead - cursor);
+    reportRows.push([
+      salesCollectionName(collection).slice(0, 28),
+      before.effectiveLastProcessedBlock,
+      cursor,
+      safeHead,
+      before.lagBlocks,
+      lagAfter,
+      batchesProcessed,
+      salesPosted,
+    ].join(" | "));
+  }
+
+  const title = dryRun
+    ? "Dry run: no sales state changed and no sales were posted."
+    : "Sales catch-up completed without skipping blocks.";
+  let content = [title, "", "```", ...reportRows, "```"].join("\n");
+  if (content.length > 1900) {
+    content = [title, "", "```", ...reportRows.slice(0, 20), `... (${reportRows.length - 20} more rows)`, "```"].join("\n");
+  }
+  await interaction.editReply({ content });
+}
+
+async function handleSalesFastForwardCommand(interaction) {
+  if (!memberIsAdmin(interaction)) {
+    await interaction.reply({ content: "Admin permission is required for `/salesfastforward`.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const collectionInput = interaction.options.getString("collection", true);
+  const confirm = interaction.options.getString("confirm", true);
+  if (confirm !== "SKIP_UNCHECKED_SALES") {
+    await interaction.editReply({
+      content: "Refused. Confirmation must exactly equal `SKIP_UNCHECKED_SALES`.",
+    });
+    return;
+  }
+
+  const collection = findSalesCollectionByInput(collectionInput);
+  if (!collection) {
+    await interaction.editReply({ content: `No sales-monitored collection matched "${collectionInput}".` });
+    return;
+  }
+
+  const head = await provider.getBlockNumber();
+  const safeHead = head - CONFIRMATIONS;
+  if (safeHead <= 0) {
+    await interaction.editReply({ content: `Sales fast-forward skipped: safeHead=${safeHead}.` });
+    return;
+  }
+
+  const collectionKey = salesCollectionKey(collection);
+  const snapshot = salesStateSnapshot(collection, safeHead);
+  const state = snapshot.state;
+  const oldCursor = snapshot.effectiveLastProcessedBlock;
+  const targetCursor = Math.max(0, safeHead - SALES_LOOKBACK_BLOCKS);
+  const newCursor = Math.max(oldCursor, targetCursor);
+  const skippedBlockCount = Math.max(0, newCursor - oldCursor);
+  state.lastProcessedBlock = newCursor;
+  saveSalesState(collectionKey, state);
+
+  const message = [
+    `Sales fast-forward completed for **${salesCollectionName(collection)}**.`,
+    `Unchecked sales blocks were skipped.`,
+    `oldCursor=${oldCursor}`,
+    `newCursor=${newCursor}`,
+    `safeHead=${safeHead}`,
+    `skippedBlockCount=${skippedBlockCount}`,
+  ].join("\n");
+
+  const alertChannelId = safeString(config?.sales?.salesAlertChannelId).trim() || "1432785087828852776";
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    await rateLimiter.send(channel, { content: `**AUDIT: /salesfastforward**\n${message}` });
+  } catch (e) {
+    console.error("[sales] fast-forward audit post failed:", e?.message || e);
+  }
+
+  await interaction.editReply({ content: message });
+}
+
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
@@ -1443,6 +1783,8 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.deferReply({ ephemeral: true });
 
       let headText = "unknown";
+      let safeHeadText = "unknown";
+      let safeHeadForSales = 0;
       const STATUS_HEAD_TIMEOUT_MS = 4000;
       let statusHeadTimeoutId = null;
       try {
@@ -1456,6 +1798,8 @@ client.on("interactionCreate", async (interaction) => {
           }),
         ]);
         headText = String(head);
+        safeHeadForSales = Math.max(0, Number(head) - CONFIRMATIONS);
+        safeHeadText = String(safeHeadForSales);
       } catch {
         // keep fallback "unknown"
       } finally {
@@ -1476,36 +1820,79 @@ client.on("interactionCreate", async (interaction) => {
         rows.push(`${name} | ${standard} | ${isAuction} | ${lastProcessedBlock}`);
       }
 
-      let content = [
+      const salesRows = [
+        "name | standard | salesCursor | safeHead | lagBlocks | status",
+        "---- | -------- | ----------- | -------- | --------- | ------",
+      ];
+      for (const collection of salesCollectionsConfig()) {
+        const snapshot = salesStateSnapshot(collection, safeHeadForSales);
+        salesRows.push([
+          salesCollectionName(collection).slice(0, 32),
+          safeString(collection?.standard).trim().toLowerCase(),
+          snapshot.effectiveLastProcessedBlock,
+          safeHeadText,
+          snapshot.lagBlocks,
+          snapshot.status,
+        ].join(" | "));
+      }
+
+      const mintContent = [
         `Head: ${headText}`,
         `DATA_DIR: ${DATA_DIR}`,
         `DATA_DIR exists: ${fs.existsSync(DATA_DIR) ? "yes" : "no"}`,
         "",
+        "Mint monitoring",
         "```",
         ...rows,
         "```",
       ].join("\n");
 
-      if (content.length > 1900) {
-        const maxRows = Math.max(2, rows.length - 1);
-        let cut = maxRows;
-        while (cut >= 2) {
-          content = [
-            `Head: ${headText}`,
-            `DATA_DIR: ${DATA_DIR}`,
-            `DATA_DIR exists: ${fs.existsSync(DATA_DIR) ? "yes" : "no"}`,
-            "",
+      const fullContent = [
+        mintContent,
+        "",
+        "Sales monitoring",
+        "```",
+        ...salesRows,
+        "```",
+      ].join("\n");
+
+      if (fullContent.length <= 1900) {
+        await interaction.editReply({ content: fullContent });
+      } else {
+        await interaction.editReply({ content: mintContent });
+        let chunkRows = salesRows.slice(0, 2);
+        for (const row of salesRows.slice(2)) {
+          const candidate = [
+            "Sales monitoring",
             "```",
-            ...rows.slice(0, cut),
-            `... (${rows.length - cut} more collections)`,
+            ...chunkRows,
+            row,
             "```",
           ].join("\n");
-          if (content.length <= 1900) break;
-          cut -= 1;
+          if (candidate.length > 1900 && chunkRows.length > 2) {
+            await interaction.followUp({
+              content: ["Sales monitoring", "```", ...chunkRows, "```"].join("\n"),
+              ephemeral: true,
+            });
+            chunkRows = salesRows.slice(0, 2);
+          }
+          chunkRows.push(row);
+        }
+        if (chunkRows.length > 2) {
+          await interaction.followUp({
+            content: ["Sales monitoring", "```", ...chunkRows, "```"].join("\n"),
+            ephemeral: true,
+          });
         }
       }
-
-      await interaction.editReply({ content });
+      return;
+    }
+    if (interaction.commandName === "salescatchup") {
+      await handleSalesCatchupCommand(interaction);
+      return;
+    }
+    if (interaction.commandName === "salesfastforward") {
+      await handleSalesFastForwardCommand(interaction);
       return;
     }
     if (interaction.commandName === "holders") {
@@ -1548,7 +1935,11 @@ await interaction.editReply({
     const fallbackError =
       interaction.commandName === "holders"
         ? "Error generating holders CSV."
-        : "Error generating ledger CSV.";
+        : interaction.commandName === "salescatchup"
+          ? "Error running sales catch-up."
+          : interaction.commandName === "salesfastforward"
+            ? "Error running sales fast-forward."
+            : "Error generating ledger CSV.";
     // if interaction already replied, followUp, else reply
     try {
       if (interaction.replied || interaction.deferred) {
@@ -2917,24 +3308,16 @@ async function initializeSalesStateNearHead(collection) {
   const safeHead = head - CONFIRMATIONS;
   if (safeHead <= 0) return;
 
-  const targetLastProcessedBlock = Math.max(0, safeHead - MAX_BLOCK_RANGE);
+  const targetLastProcessedBlock = Math.max(0, safeHead - SALES_MAX_BLOCK_RANGE);
   const currentLastProcessedBlock = Number(st.lastProcessedBlock || 0);
 
   if (!currentLastProcessedBlock || currentLastProcessedBlock === 0) {
     st.lastProcessedBlock = targetLastProcessedBlock;
     saveSalesState(collectionKey, st);
     console.log(
-      `[sales] cursor initialized near head collection=${collectionName} lastProcessedBlock=${st.lastProcessedBlock} safeHead=${safeHead} bufferBlocks=${MAX_BLOCK_RANGE}`
+      `[sales] cursor initialized near head collection=${collectionName} lastProcessedBlock=${st.lastProcessedBlock} safeHead=${safeHead} bufferBlocks=${SALES_MAX_BLOCK_RANGE}`
     );
     return;
-  }
-
-  if (currentLastProcessedBlock < targetLastProcessedBlock) {
-    st.lastProcessedBlock = targetLastProcessedBlock;
-    saveSalesState(collectionKey, st);
-    console.log(
-      `[sales] cursor fast-forwarded near head collection=${collectionName} from=${currentLastProcessedBlock} to=${st.lastProcessedBlock} safeHead=${safeHead} bufferBlocks=${MAX_BLOCK_RANGE}`
-    );
   }
 }
 
@@ -3474,6 +3857,47 @@ async function registerCommands() {
           .setRequired(false)
       )
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName("salescatchup")
+      .setDescription("Catch up sales monitoring sequentially without skipping blocks")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .addStringOption((opt) =>
+        opt
+          .setName("collection")
+          .setDescription("Optional collection name or contract address. Omit for all sales collections.")
+          .setRequired(false)
+      )
+      .addIntegerOption((opt) =>
+        opt
+          .setName("max_batches")
+          .setDescription("Maximum sales windows to process per collection. Defaults to 10.")
+          .setRequired(false)
+          .setMinValue(1)
+      )
+      .addBooleanOption((opt) =>
+        opt
+          .setName("dry_run")
+          .setDescription("Preview ranges without changing sales state or posting sales.")
+          .setRequired(false)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("salesfastforward")
+      .setDescription("Emergency-only: skip unchecked sales blocks for one collection")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .addStringOption((opt) =>
+        opt
+          .setName("collection")
+          .setDescription("Collection name or contract address")
+          .setRequired(true)
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("confirm")
+          .setDescription("Must exactly equal SKIP_UNCHECKED_SALES")
+          .setRequired(true)
+      )
+      .toJSON(),
   ];
 
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_BOT_TOKEN);
@@ -3513,7 +3937,7 @@ async function startPolling() {
     }
   }
 
-  console.log(`✅ Polling started. mintInterval=${MINT_POLL_MS}ms salesInterval=${SALES_POLL_MS}ms salesEnabled=${config?.sales?.enabled === true} confirmations=${CONFIRMATIONS} range=${MAX_BLOCK_RANGE}`);
+  console.log(`✅ Polling started. mintInterval=${MINT_POLL_MS}ms salesInterval=${SALES_POLL_MS}ms salesEnabled=${config?.sales?.enabled === true} confirmations=${CONFIRMATIONS} mintRange=${MAX_BLOCK_RANGE} salesRange=${SALES_MAX_BLOCK_RANGE}`);
 
   // run immediately, then interval
   console.log("[startup:startPolling] before first immediate pollOnce()");
