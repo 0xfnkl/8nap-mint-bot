@@ -405,6 +405,7 @@ function loadSalesState(collectionKey) {
     version: 1,
     lastProcessedBlock: 0,
     processed: {},
+    failedPosts: {},
   };
 
   try {
@@ -419,6 +420,7 @@ function loadSalesState(collectionKey) {
     if (typeof parsed.version !== "number") parsed.version = 1;
     if (typeof parsed.lastProcessedBlock !== "number") parsed.lastProcessedBlock = 0;
     if (!parsed.processed || typeof parsed.processed !== "object") parsed.processed = {};
+    if (!parsed.failedPosts || typeof parsed.failedPosts !== "object") parsed.failedPosts = {};
 
     return parsed;
   } catch (e) {
@@ -439,6 +441,11 @@ function saveSalesState(collectionKey, state) {
   if (typeof state.version !== "number") state.version = 1;
   if (typeof state.lastProcessedBlock !== "number") state.lastProcessedBlock = 0;
   if (!state.processed || typeof state.processed !== "object") state.processed = {};
+  if (!state.failedPosts || typeof state.failedPosts !== "object") state.failedPosts = {};
+  const processedKeys = new Set(Object.keys(state.processed));
+  for (const failedKey of Object.keys(state.failedPosts)) {
+    if (!processedKeys.has(failedKey)) delete state.failedPosts[failedKey];
+  }
 
   fs.writeFileSync(salesStateFileFor(collectionKey), JSON.stringify(state, null, 2));
 }
@@ -632,6 +639,45 @@ function safeLowercaseString(value) {
 function safeString(value) {
   if (value === null || value === undefined) return "";
   return String(value);
+}
+
+function serializeErrorForLog(error, seen = new WeakSet()) {
+  if (error === null || error === undefined) return error;
+
+  if (typeof error !== "object") return String(error);
+
+  if (seen.has(error)) return "[Circular]";
+  seen.add(error);
+
+  const output = {
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+  };
+
+  for (const key of Object.keys(error)) {
+    if (key === "errors" || key === "cause") continue;
+    try {
+      output[key] = serializeErrorForLog(error[key], seen);
+    } catch (nestedError) {
+      output[key] = `[Unserializable: ${nestedError?.message || nestedError}]`;
+    }
+  }
+
+  if (Array.isArray(error.errors)) {
+    output.errors = error.errors.map((nested) => serializeErrorForLog(nested, seen));
+  }
+
+  if (error.cause !== undefined) {
+    output.cause = serializeErrorForLog(error.cause, seen);
+  }
+
+  return output;
+}
+
+function logSalesError(context, error) {
+  console.error(context, error?.message || error);
+  console.error(JSON.stringify(serializeErrorForLog(error), null, 2));
 }
 
 function saleKeyFromRecord(sale) {
@@ -1073,6 +1119,50 @@ async function postSale(collection, sale) {
   await rateLimiter.send(channel, { embeds: [embed] });
 }
 
+function buildFailedSalePostRecord(collection, sale, key, error) {
+  return {
+    status: "post_failed",
+    handled: true,
+    failedAt: new Date().toISOString(),
+    collectionName: salesCollectionName(collection),
+    collectionKey: salesCollectionKey(collection),
+    key,
+    txHash: safeString(sale?.txHash).trim(),
+    tokenId: safeString(sale?.tokenId).trim(),
+    blockNumber: safeString(sale?.blockNumber).trim(),
+    logIndex: safeString(sale?.logIndex).trim(),
+    contract: safeString(sale?.contract || collection?.contractAddress).trim(),
+    sale,
+    error: serializeErrorForLog(error),
+  };
+}
+
+async function postSalesPostFailureAlert(collection, sale, failureRecord) {
+  const alertChannelId = safeString(config?.sales?.salesAlertChannelId).trim() || "1432785087828852776";
+  if (!alertChannelId) return;
+
+  const errorMessage = safeString(failureRecord?.error?.message).trim() || "unknown error";
+  const content = [
+    `**Sales post failed: ${salesCollectionName(collection)}**`,
+    "A sale was detected and marked handled, but the Discord sale post failed.",
+    `tx: ${safeString(sale?.txHash).trim() || "unknown"}`,
+    `token ID: ${safeString(sale?.tokenId).trim() || "unknown"}`,
+    `block: ${safeString(sale?.blockNumber).trim() || "unknown"}`,
+    `sale key: ${safeString(failureRecord?.key).trim() || "unknown"}`,
+    `error: ${errorMessage.slice(0, 500)}`,
+  ].join("\n").slice(0, 1900);
+
+  try {
+    const channel = await client.channels.fetch(alertChannelId);
+    await rateLimiter.send(channel, { content });
+  } catch (e) {
+    logSalesError(
+      `[sales] failed-sale alert post failed collection=${salesCollectionName(collection)} tx=${safeString(sale?.txHash).trim() || "unknown"} tokenId=${safeString(sale?.tokenId).trim() || "unknown"} blockNumber=${safeString(sale?.blockNumber).trim() || "unknown"}:`,
+      e
+    );
+  }
+}
+
 async function postSalesLagAlertIfNeeded(collection, snapshot) {
   const status = snapshot?.status;
   if (status !== "BEHIND" && status !== "CRITICAL") {
@@ -1426,6 +1516,13 @@ async function processSalesCollectionRange(collection, fromBlock, toBlock, safeH
   const dryRun = options.dryRun === true;
   const persist = options.persist !== false && !dryRun;
   const post = options.post !== false && !dryRun;
+  const postSaleFn = typeof options.postSaleFn === "function" ? options.postSaleFn : postSale;
+  const failedSaleAlertFn = typeof options.failedSaleAlertFn === "function"
+    ? options.failedSaleAlertFn
+    : postSalesPostFailureAlert;
+  const normalizedSalesOverride = Array.isArray(options.normalizedSales)
+    ? options.normalizedSales
+    : null;
   const collectionName = salesCollectionName(collection);
   const collectionKey = salesCollectionKey(collection);
   const erc721FallbackEligible = supportsErc721SalesFallback(collection);
@@ -1472,11 +1569,15 @@ async function processSalesCollectionRange(collection, fromBlock, toBlock, safeH
     version: currentState.version,
     lastProcessedBlock: effectiveLastProcessedBlock,
     processed: { ...(currentState.processed || {}) },
+    failedPosts: { ...(currentState.failedPosts || {}) },
   };
 
   let onchainRawCandidateCount = 0;
   let normalizedSales = [];
-  if (erc721FallbackEligible) {
+  if (normalizedSalesOverride) {
+    normalizedSales = normalizedSalesOverride;
+    onchainRawCandidateCount = normalizedSales.length;
+  } else if (erc721FallbackEligible) {
     const onchainCandidates = await findErc721OnchainSaleCandidatesInRange(collection, fromBlock, toBlock);
     onchainRawCandidateCount = onchainCandidates.length;
     normalizedSales = onchainCandidates.flatMap((candidate) =>
@@ -1496,17 +1597,43 @@ async function processSalesCollectionRange(collection, fromBlock, toBlock, safeH
     );
   }
   let newSalesCount = 0;
+  let failedSalesCount = 0;
 
   for (const sale of normalizedSales) {
     const key = saleKeyFromRecord(sale);
     if (nextState.processed[key]) continue;
-    if (post) await postSale(collection, sale);
-    nextState.processed[key] = true;
-    newSalesCount += 1;
+
+    try {
+      if (post) await postSaleFn(collection, sale);
+      nextState.processed[key] = true;
+      if (nextState.failedPosts[key]) delete nextState.failedPosts[key];
+      newSalesCount += 1;
+    } catch (e) {
+      failedSalesCount += 1;
+      const failureRecord = buildFailedSalePostRecord(collection, sale, key, e);
+      nextState.failedPosts[key] = failureRecord;
+      nextState.processed[key] = {
+        status: "post_failed",
+        handled: true,
+        failedAt: failureRecord.failedAt,
+      };
+      logSalesError(
+        `[sales] sale post failed collection=${collectionName} tx=${failureRecord.txHash || "unknown"} tokenId=${failureRecord.tokenId || "unknown"} blockNumber=${failureRecord.blockNumber || "unknown"}:`,
+        e
+      );
+      try {
+        await failedSaleAlertFn(collection, sale, failureRecord);
+      } catch (alertError) {
+        logSalesError(
+          `[sales] failed-sale alert failed collection=${collectionName} tx=${failureRecord.txHash || "unknown"} tokenId=${failureRecord.tokenId || "unknown"} blockNumber=${failureRecord.blockNumber || "unknown"}:`,
+          alertError
+        );
+      }
+    }
   }
 
   console.log(
-    `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} lagBlocks=${lagBlocks} onchainRawCandidates=${onchainRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount}`
+    `[sales] summary collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead} lagBlocks=${lagBlocks} onchainRawCandidates=${onchainRawCandidateCount} normalized=${normalizedSales.length} posted=${newSalesCount} failedPosts=${failedSalesCount}`
   );
 
   nextState.lastProcessedBlock = toBlock;
@@ -1524,6 +1651,7 @@ async function processSalesCollectionRange(collection, fromBlock, toBlock, safeH
     lagBefore: lagBlocks,
     lagAfter: Math.max(0, Number(safeHead || 0) - nextState.lastProcessedBlock),
     posted: newSalesCount,
+    failedPosts: failedSalesCount,
     normalized: normalizedSales.length,
     rawCandidates: onchainRawCandidateCount,
   };
@@ -1568,9 +1696,9 @@ async function pollSalesOnce() {
       const result = await processSalesCollectionRange(collection, fromBlock, toBlock, safeHead);
       if (result.advanced) advancedAny = true;
     } catch (e) {
-      console.error(
+      logSalesError(
         `[sales] poll failed collection=${collectionName} fromBlock=${fromBlock} toBlock=${toBlock} safeHead=${safeHead}:`,
-        e?.message || e
+        e
       );
     }
   }
