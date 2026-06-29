@@ -1067,18 +1067,27 @@ function buildSaleEmbedTitle(collectionName, tokenId, artworkTitle) {
   return `${collectionName} #${tokenId}`;
 }
 
-async function postSale(collection, sale) {
+async function buildSaleEmbed(collection, sale, options = {}) {
   const tokenId = safeString(sale?.tokenId).trim() || "unknown";
   const sellerWallet = safeLowercaseAddress(sale?.sellerWallet);
   const buyerWallet = safeLowercaseAddress(sale?.buyerWallet);
   const contract = safeLowercaseAddress(sale?.contract || collection?.contractAddress);
+  const txHash = safeLowercaseString(sale?.txHash);
   const blockNumberText = safeString(sale?.blockNumber).trim();
+  const collectionName = safeString(collection?.name).trim();
+  const context = {
+    collectionName: collectionName || salesCollectionName(collection),
+    txHash: txHash || "unknown",
+  };
 
   const sellerDisplay = sellerWallet ? await formatDisplayAddress(sellerWallet) : "unknown";
   const buyerDisplay = buyerWallet ? await formatDisplayAddress(buyerWallet) : "unknown";
 
   const priceLine = await formatSalePriceLine(sale);
-  const { artworkTitle, imageUrl, videoUrl } = await loadSaleRenderMetadata(collection, sale);
+  const loadSaleRenderMetadataFn = typeof options.loadSaleRenderMetadataFn === "function"
+    ? options.loadSaleRenderMetadataFn
+    : loadSaleRenderMetadata;
+  const { artworkTitle, imageUrl, videoUrl } = await loadSaleRenderMetadataFn(collection, sale);
 
   let timestampMs = Date.now();
   const blockNumber = Number(blockNumberText);
@@ -1089,11 +1098,21 @@ async function postSale(collection, sale) {
     } catch {}
   }
 
-  const embed = new EmbedBuilder()
-    .setTitle(buildSaleEmbedTitle(safeString(collection?.name).trim(), tokenId, artworkTitle))
-    .setDescription(
-      [
-        `Collection: **${safeString(collection?.name).trim()}**`,
+  const openSeaLink = markdownLinkIfWithinLimit("View on OpenSea", openseaUrl(contract, tokenId), 512) ||
+    openseaUrl(contract, tokenId);
+  const txLink = txHash
+    ? (markdownLinkIfWithinLimit("View transaction", etherscanTxUrl(txHash), 512) || etherscanTxUrl(txHash))
+    : "";
+  const fields = [];
+  if (videoUrl) {
+    fields.push(buildDiscordVideoField(videoUrl, openseaUrl(contract, tokenId), context));
+  }
+
+  const embedParts = sanitizeDiscordEmbedParts(
+    {
+      title: buildSaleEmbedTitle(collectionName, tokenId, artworkTitle),
+      description: [
+        `Collection: **${collectionName}**`,
         `Token#: **${tokenId}**`,
         ...(safeString(sale?.standard || collection?.standard).trim().toLowerCase() === "erc1155"
           ? [`Quantity: **${safeString(sale?.quantity).trim() || "1"}**`]
@@ -1102,19 +1121,35 @@ async function postSale(collection, sale) {
         `Price: **${priceLine}**`,
         `Seller: **${sellerDisplay}**`,
         `Buyer: **${buyerDisplay}**`,
+        ...(safeString(sale?.marketplace).trim() ? [`Marketplace: **${safeString(sale.marketplace).trim()}**`] : []),
         ``,
-        `[View on OpenSea](${openseaUrl(contract, tokenId)})`,
-      ].filter(Boolean).join("\n")
-    )
-    .setTimestamp(new Date(timestampMs))
-    .setFooter({ text: safeString(collection?.name).trim() || "Sales" });
+        openSeaLink,
+        ...(txLink ? [txLink] : []),
+      ].filter(Boolean).join("\n"),
+      footerText: collectionName || "Sales",
+      fields,
+    },
+    context
+  );
 
-  if (videoUrl) {
-    embed.addFields({ name: "Media", value: `[View video](${videoUrl})`, inline: false });
+  const embed = new EmbedBuilder()
+    .setTitle(embedParts.title || `${collectionName || "Sale"} #${tokenId}`)
+    .setDescription(embedParts.description || "Sale detected.")
+    .setTimestamp(new Date(timestampMs))
+    .setFooter({ text: embedParts.footerText || "Sales" });
+
+  if (embedParts.authorName) {
+    embed.setAuthor({ name: embedParts.authorName });
   }
 
+  if (embedParts.fields.length > 0) embed.addFields(...embedParts.fields);
   if (imageUrl) embed.setImage(imageUrl);
 
+  return embed;
+}
+
+async function postSale(collection, sale) {
+  const embed = await buildSaleEmbed(collection, sale);
   const channel = await client.channels.fetch(config.sales.discordChannelId);
   await rateLimiter.send(channel, { embeds: [embed] });
 }
@@ -2958,6 +2993,168 @@ function openseaUrl(contractAddress, tokenId) {
   return `https://opensea.io/assets/${CHAIN}/${contractAddress}/${tokenId}`;
 }
 
+function etherscanTxUrl(txHash) {
+  return `https://etherscan.io/tx/${txHash}`;
+}
+
+const DISCORD_EMBED_LIMITS = {
+  title: 256,
+  description: 4096,
+  fieldName: 256,
+  fieldValue: 1024,
+  footerText: 2048,
+  authorName: 256,
+  fields: 25,
+  totalText: 6000,
+};
+
+function discordTextLength(value) {
+  return safeString(value).length;
+}
+
+function truncateDiscordText(value, maxLength) {
+  const text = safeString(value);
+  const max = Math.max(0, Number(maxLength) || 0);
+  if (text.length <= max) return text;
+  if (max <= 0) return "";
+  if (max <= 3) return ".".repeat(max);
+  return `${text.slice(0, max - 3).trimEnd()}...`;
+}
+
+function logDiscordEmbedSanitization(context, component, originalLength, finalLength) {
+  console.warn(
+    `[discord:embed:sanitize] collection=${safeString(context?.collectionName).trim() || "unknown"} tx=${safeString(context?.txHash).trim() || "unknown"} component=${component} originalLength=${originalLength} finalLength=${finalLength}`
+  );
+}
+
+function sanitizeDiscordEmbedText(value, maxLength, context, component) {
+  const original = safeString(value);
+  const sanitized = truncateDiscordText(original, maxLength);
+  if (sanitized.length !== original.length) {
+    logDiscordEmbedSanitization(context, component, original.length, sanitized.length);
+  }
+  return sanitized;
+}
+
+function discordEmbedTextTotal(parts) {
+  const fields = Array.isArray(parts?.fields) ? parts.fields : [];
+  return [
+    parts?.title,
+    parts?.description,
+    parts?.footerText,
+    parts?.authorName,
+    ...fields.flatMap((field) => [field?.name, field?.value]),
+  ].reduce((total, value) => total + discordTextLength(value), 0);
+}
+
+function enforceDiscordEmbedAggregateLimit(parts, context) {
+  let total = discordEmbedTextTotal(parts);
+  if (total <= DISCORD_EMBED_LIMITS.totalText) return parts;
+
+  const trimComponent = (key, componentName) => {
+    if (total <= DISCORD_EMBED_LIMITS.totalText) return;
+    const current = safeString(parts[key]);
+    if (!current) return;
+
+    const overflow = total - DISCORD_EMBED_LIMITS.totalText;
+    const targetLength = Math.max(0, current.length - overflow);
+    const next = truncateDiscordText(current, targetLength);
+    parts[key] = next;
+    total = discordEmbedTextTotal(parts);
+    logDiscordEmbedSanitization(context, componentName, current.length, next.length);
+  };
+
+  trimComponent("description", "embed.description.aggregate");
+  trimComponent("footerText", "embed.footer.aggregate");
+  trimComponent("title", "embed.title.aggregate");
+  trimComponent("authorName", "embed.author.aggregate");
+
+  if (total > DISCORD_EMBED_LIMITS.totalText && Array.isArray(parts.fields)) {
+    for (let i = parts.fields.length - 1; i >= 0 && total > DISCORD_EMBED_LIMITS.totalText; i--) {
+      const field = parts.fields[i];
+      const current = safeString(field?.value);
+      const overflow = total - DISCORD_EMBED_LIMITS.totalText;
+      const targetLength = Math.max(0, current.length - overflow);
+      const next = truncateDiscordText(current, targetLength);
+      field.value = next;
+      total = discordEmbedTextTotal(parts);
+      logDiscordEmbedSanitization(context, `field:${safeString(field?.name).trim() || i}.value.aggregate`, current.length, next.length);
+    }
+  }
+
+  return parts;
+}
+
+function sanitizeDiscordEmbedParts(parts, context = {}) {
+  const sanitized = {
+    title: sanitizeDiscordEmbedText(parts?.title, DISCORD_EMBED_LIMITS.title, context, "embed.title"),
+    description: sanitizeDiscordEmbedText(parts?.description, DISCORD_EMBED_LIMITS.description, context, "embed.description"),
+    footerText: sanitizeDiscordEmbedText(parts?.footerText, DISCORD_EMBED_LIMITS.footerText, context, "embed.footer"),
+    authorName: sanitizeDiscordEmbedText(parts?.authorName, DISCORD_EMBED_LIMITS.authorName, context, "embed.author"),
+    fields: [],
+  };
+
+  const inputFields = Array.isArray(parts?.fields) ? parts.fields : [];
+  if (inputFields.length > DISCORD_EMBED_LIMITS.fields) {
+    logDiscordEmbedSanitization(context, "embed.fields.count", inputFields.length, DISCORD_EMBED_LIMITS.fields);
+  }
+
+  sanitized.fields = inputFields.slice(0, DISCORD_EMBED_LIMITS.fields).map((field, index) => {
+    const originalName = safeString(field?.name).trim() || "\u200b";
+    const name = sanitizeDiscordEmbedText(
+      originalName,
+      DISCORD_EMBED_LIMITS.fieldName,
+      context,
+      `field:${originalName || index}.name`
+    ) || "\u200b";
+    const value = sanitizeDiscordEmbedText(
+      safeString(field?.value) || "\u200b",
+      DISCORD_EMBED_LIMITS.fieldValue,
+      context,
+      `field:${name}.value`
+    ) || "\u200b";
+    return { name, value, inline: field?.inline === true };
+  });
+
+  return enforceDiscordEmbedAggregateLimit(sanitized, context);
+}
+
+function isHttpLikeUrl(value) {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function markdownLinkIfWithinLimit(label, url, maxLength) {
+  const cleanLabel = safeString(label).trim() || "Link";
+  const cleanUrl = safeString(url).trim();
+  if (!cleanUrl) return "";
+
+  const markdown = `[${cleanLabel}](${cleanUrl})`;
+  if (markdown.length <= maxLength) return markdown;
+  if (isHttpLikeUrl(cleanUrl) && cleanUrl.length <= maxLength) return cleanUrl;
+  return "";
+}
+
+function buildDiscordVideoField(videoUrl, fallbackUrl, context) {
+  const fullValue = `[View video](${safeString(videoUrl).trim()})`;
+  if (fullValue.length <= DISCORD_EMBED_LIMITS.fieldValue) {
+    return { name: "Media", value: fullValue, inline: false };
+  }
+
+  const fallbackLink = markdownLinkIfWithinLimit("View artwork", fallbackUrl, 600);
+  const fallbackValue = [
+    "Video URL omitted because it exceeds Discord's field limit.",
+    fallbackLink || "View the artwork from the sale link above.",
+  ].filter(Boolean).join(" ");
+  logDiscordEmbedSanitization(context, "field:Media.value", fullValue.length, fallbackValue.length);
+
+  return { name: "Media", value: fallbackValue, inline: false };
+}
+
 function auctionViewLink(collection) {
   const configuredUrl = safeString(collection?.collectionUrl).trim();
   if (configuredUrl) return configuredUrl;
@@ -3154,7 +3351,11 @@ try {
     .setFooter({ text: collection.name });
 
   if (videoUrl) {
-    embed.addFields({ name: "Media", value: `[View video](${videoUrl})`, inline: false });
+    embed.addFields(buildDiscordVideoField(
+      videoUrl,
+      openseaUrl(collection.contractAddress, tokenIdStr),
+      { collectionName: collection.name, txHash }
+    ));
   }
 
   if (imageUrl) embed.setImage(imageUrl);
