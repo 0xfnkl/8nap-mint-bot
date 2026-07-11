@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 const { ethers } = require("ethers");
+const { HoldersAlchemyError, fetchHolderSnapshot, buildHoldersCsv, holdersFilename } = require("./holders-alchemy");
 
 // =========================
 // Config + Env validation
@@ -2230,48 +2231,6 @@ function parseTokenIdOption(rawTokenId) {
   return BigInt(value);
 }
 
-function applyBalanceDelta(balanceMap, walletAddressLower, delta) {
-  if (!walletAddressLower || delta === 0n) return;
-  const next = (balanceMap.get(walletAddressLower) || 0n) + delta;
-  if (next > 0n) {
-    balanceMap.set(walletAddressLower, next);
-  } else {
-    balanceMap.delete(walletAddressLower);
-  }
-}
-
-function holderRowsFromBalanceMap(balanceMap) {
-  const rows = [];
-  for (const [wallet, quantity] of balanceMap.entries()) {
-    if (quantity > 0n) rows.push({ wallet, quantity });
-  }
-
-  rows.sort((a, b) => {
-    if (a.quantity === b.quantity) {
-      if (a.wallet < b.wallet) return -1;
-      if (a.wallet > b.wallet) return 1;
-      return 0;
-    }
-    return a.quantity > b.quantity ? -1 : 1;
-  });
-
-  return rows;
-}
-
-function buildHoldersCsv(rows) {
-  const lines = ["WalletAddress,Quantity"];
-  for (const row of rows) {
-    lines.push(`${csvEscape(row.wallet)},${csvEscape(row.quantity.toString())}`);
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-function holdersFilename(contractAddressLower, tokenId = null) {
-  const date = new Date().toISOString().slice(0, 10);
-  if (tokenId == null) return `holders-${date}-${contractAddressLower}.csv`;
-  return `holders-${date}-${contractAddressLower}-token-${tokenId.toString()}.csv`;
-}
-
 function writeTempCsv(baseName, csvText) {
   const nonce = `${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2, 8)}`;
   const tempPath = path.join(TEMP_DIR, `${nonce}-${baseName}`);
@@ -2343,31 +2302,9 @@ async function callSucceeds(fn) {
   }
 }
 
-async function hasLogsInRecentRange(contractAddress, topics, safeHead, lookbackBlocks) {
-  if (safeHead <= 0) return false;
-  const fromBlock = Math.max(0, safeHead - lookbackBlocks + 1);
-  let found = false;
-
-  await scanLogsBounded({
-    address: contractAddress,
-    fromBlock,
-    toBlock: safeHead,
-    topics,
-    onLogs: async (logs) => {
-      if (logs.length > 0) {
-        found = true;
-        return false;
-      }
-      return true;
-    },
-  });
-
-  return found;
-}
-
-async function detectNftStandard(contractAddress, safeHead) {
+async function detectNftStandard(contractAddress) {
   const address = ethers.getAddress(contractAddress);
-  const code = await provider.getCode(address, safeHead);
+  const code = await provider.getCode(address);
   if (!code || code === "0x") {
     return {
       standard: null,
@@ -2437,27 +2374,6 @@ async function detectNftStandard(contractAddress, safeHead) {
     return { standard: "erc1155", detectionMethod: "heuristic-method-probe" };
   }
 
-  const lookbackBlocks = Math.max(HOLDERS_MAX_BLOCK_RANGE * 4, 500);
-  const has721Logs = await hasLogsInRecentRange(
-    address,
-    [[ERC721_TRANSFER_TOPIC]],
-    safeHead,
-    lookbackBlocks
-  );
-  const has1155Logs = await hasLogsInRecentRange(
-    address,
-    [[ERC1155_TRANSFER_SINGLE_TOPIC, ERC1155_TRANSFER_BATCH_TOPIC]],
-    safeHead,
-    lookbackBlocks
-  );
-
-  if (has721Logs && !has1155Logs && erc721Score >= 2) {
-    return { standard: "erc721", detectionMethod: "heuristic-log-shape" };
-  }
-  if (has1155Logs && !has721Logs && erc1155Score >= 2) {
-    return { standard: "erc1155", detectionMethod: "heuristic-log-shape" };
-  }
-
   return {
     standard: null,
     detectionMethod: "unknown",
@@ -2465,148 +2381,19 @@ async function detectNftStandard(contractAddress, safeHead) {
   };
 }
 
-async function findContractDeploymentBlock(contractAddress, safeHead) {
-  const codeAtSafeHead = await provider.getCode(contractAddress, safeHead);
-  if (!codeAtSafeHead || codeAtSafeHead === "0x") return null;
-
-  let lo = 0;
-  let hi = safeHead;
-  let answer = safeHead;
-
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    let codeAtMid;
-    try {
-      codeAtMid = await provider.getCode(contractAddress, mid);
-    } catch (e) {
-      throw new Error(`Failed to read historical code at block ${mid}: ${e.message}`);
-    }
-
-    if (codeAtMid && codeAtMid !== "0x") {
-      answer = mid;
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
-  }
-
-  return answer;
-}
-
-async function resolveHoldersScanStartBlock(contractAddress, safeHead) {
-  try {
-    const deploymentBlock = await findContractDeploymentBlock(contractAddress, safeHead);
-    if (deploymentBlock != null) return deploymentBlock;
-  } catch (e) {
-    console.log(`⚠️ deployment block lookup failed for ${contractAddress}: ${e.message}`);
-  }
-
-  return 0;
-}
-
-async function buildErc721HolderBalances(contractAddress, fromBlock, toBlock) {
-  const balances = new Map();
-  let transferLogCount = 0;
-
-  await scanLogsBounded({
-    address: contractAddress,
-    fromBlock,
-    toBlock,
-    topics: [[ERC721_TRANSFER_TOPIC]],
-    onLogs: async (logs) => {
-      for (const log of logs) {
-        let parsed;
-        try {
-          parsed = ERC721_TRANSFER_IFACE.parseLog(log);
-        } catch {
-          continue;
-        }
-
-        if (parsed.name !== "Transfer") continue;
-        transferLogCount += 1;
-
-        const from = String(parsed.args.from).toLowerCase();
-        const to = String(parsed.args.to).toLowerCase();
-
-        if (from !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, from, -1n);
-        if (to !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, to, 1n);
-      }
-      return true;
-    },
-  });
-
-  return { balances, transferLogCount };
-}
-
-async function buildErc1155HolderBalances(contractAddress, fromBlock, toBlock, tokenId = null) {
-  const balances = new Map();
-  let transferLogCount = 0;
-  let matchedTransferCount = 0;
-
-  await scanLogsBounded({
-    address: contractAddress,
-    fromBlock,
-    toBlock,
-    topics: [[ERC1155_TRANSFER_SINGLE_TOPIC, ERC1155_TRANSFER_BATCH_TOPIC]],
-    onLogs: async (logs) => {
-      for (const log of logs) {
-        let parsed;
-        try {
-          parsed = ERC1155_TRANSFER_IFACE.parseLog(log);
-        } catch {
-          continue;
-        }
-
-        transferLogCount += 1;
-
-        if (parsed.name === "TransferSingle") {
-          const id = BigInt(parsed.args.id.toString());
-          if (tokenId != null && id !== tokenId) continue;
-
-          const value = BigInt(parsed.args.value.toString());
-          if (value <= 0n) continue;
-          matchedTransferCount += 1;
-
-          const from = String(parsed.args.from).toLowerCase();
-          const to = String(parsed.args.to).toLowerCase();
-
-          if (from !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, from, -value);
-          if (to !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, to, value);
-          continue;
-        }
-
-        if (parsed.name === "TransferBatch") {
-          const ids = parsed.args.ids || [];
-          const values = parsed.args.values || [];
-          let moved = 0n;
-
-          for (let i = 0; i < ids.length; i++) {
-            const id = BigInt(ids[i].toString());
-            if (tokenId != null && id !== tokenId) continue;
-            moved += BigInt(values[i].toString());
-          }
-
-          if (moved <= 0n) continue;
-          matchedTransferCount += 1;
-
-          const from = String(parsed.args.from).toLowerCase();
-          const to = String(parsed.args.to).toLowerCase();
-
-          if (from !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, from, -moved);
-          if (to !== ZERO_ADDRESS_LOWER) applyBalanceDelta(balances, to, moved);
-        }
-      }
-      return true;
-    },
-  });
-
-  return { balances, transferLogCount, matchedTransferCount };
-}
-
+let holdersExportInFlight = false;
 async function handleHoldersCommand(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
+  if (holdersExportInFlight) {
+    await interaction.editReply({ content: "Another holder snapshot is already running. Please try again after it completes." });
+    return;
+  }
+  holdersExportInFlight = true;
+
   let tempCsvPath = null;
+  const startedAt = Date.now();
+  let logContext = {};
   try {
     const rawContract = String(interaction.options.getString("contract", true) || "").trim();
     const tokenId = parseTokenIdOption(interaction.options.getString("token_id"));
@@ -2620,16 +2407,12 @@ async function handleHoldersCommand(interaction) {
 
     const contractAddress = ethers.getAddress(rawContract);
 
-    const head = await provider.getBlockNumber();
-    const safeHead = head - CONFIRMATIONS;
-    if (safeHead <= 0) {
-      await interaction.editReply({
-        content: "Chain head is not ready yet. Please try again shortly.",
-      });
+    if (!isNonEmptyString(process.env.ALCHEMY_NFT_API_KEY)) {
+      await interaction.editReply({ content: "Holder snapshots are unavailable because ALCHEMY_NFT_API_KEY is not configured." });
       return;
     }
 
-    const detected = await detectNftStandard(contractAddress, safeHead);
+    const detected = await detectNftStandard(contractAddress);
     if (!detected.standard) {
       await interaction.editReply({
         content: `Could not detect ERC721/ERC1155 for ${contractAddress}. ${detected.reason || ""}`.trim(),
@@ -2637,78 +2420,45 @@ async function handleHoldersCommand(interaction) {
       return;
     }
 
-    const fromBlock = await resolveHoldersScanStartBlock(contractAddress, safeHead);
     const contractLower = contractAddress.toLowerCase();
-
-    let balances;
-    let transferLogCount = 0;
-    let matchedTransferCount = 0;
-    let modeLabel = "";
-    let note = null;
-    let outputTokenId = null;
-
-    if (detected.standard === "erc721") {
-      const erc721Result = await buildErc721HolderBalances(contractAddress, fromBlock, safeHead);
-      balances = erc721Result.balances;
-      transferLogCount = erc721Result.transferLogCount;
-      modeLabel = "ERC721 collection-wide";
-
-      if (tokenId != null) {
-        note = "token_id was provided but ignored because ERC721 exports are collection-wide.";
-      }
-    } else {
-      if (tokenId != null) {
-        const erc1155TokenResult = await buildErc1155HolderBalances(contractAddress, fromBlock, safeHead, tokenId);
-        balances = erc1155TokenResult.balances;
-        transferLogCount = erc1155TokenResult.transferLogCount;
-        matchedTransferCount = erc1155TokenResult.matchedTransferCount;
-        modeLabel = `ERC1155 token ${tokenId.toString()}`;
-        outputTokenId = tokenId;
-      } else {
-        const erc1155ContractResult = await buildErc1155HolderBalances(contractAddress, fromBlock, safeHead, null);
-        balances = erc1155ContractResult.balances;
-        transferLogCount = erc1155ContractResult.transferLogCount;
-        matchedTransferCount = erc1155ContractResult.matchedTransferCount;
-        modeLabel = "ERC1155 full contract (total units)";
-      }
+    if (detected.standard === "erc721" && tokenId != null) {
+      await interaction.editReply({ content: "ERC721 holder exports operate at the whole-collection level. Remove token_id and try again." });
+      return;
     }
-
-    const rows = holderRowsFromBalanceMap(balances);
+    logContext = { contract: contractLower, standard: detected.standard, tokenId: tokenId?.toString() ?? null, endpoint: "getOwnersForContract" };
+    const snapshotAt = new Date();
+    const result = await fetchHolderSnapshot({ apiKey: process.env.ALCHEMY_NFT_API_KEY, contractAddress: contractLower, standard: detected.standard, tokenId });
+    const rows = result.rows;
     const csvText = buildHoldersCsv(rows);
-    const outputName = holdersFilename(contractLower, outputTokenId);
+    const outputName = holdersFilename(contractLower, tokenId, snapshotAt);
     tempCsvPath = writeTempCsv(outputName, csvText);
-
-    const summaryLines = [
-      `Detected standard: **${detected.standard.toUpperCase()}** (${detected.detectionMethod})`,
-      `Mode: **${modeLabel}**`,
-      `Wallets exported: **${rows.length}**`,
-      `Scanned blocks: **${fromBlock}-${safeHead}**`,
-    ];
-
-    if (detected.standard === "erc1155" && tokenId != null) {
-      summaryLines.push(`Token transfer events matched: **${matchedTransferCount}**`);
-    }
-    if (transferLogCount === 0) {
-      summaryLines.push("No transfer logs were found for this contract.");
-    }
-    if (detected.standard === "erc1155" && tokenId != null && rows.length === 0) {
-      summaryLines.push("No current holders found for that token_id.");
-    }
-    if (note) summaryLines.push(note);
+    logContext = { contract: contractLower, standard: detected.standard, tokenId: tokenId?.toString() ?? null, ...result.metrics };
 
     const attachment = new AttachmentBuilder(tempCsvPath, { name: outputName });
     await interaction.editReply({
-      content: summaryLines.join("\n"),
+      content: ["Holder snapshot complete.", "", `Unique wallets: ${rows.length}`, `Total quantity: ${result.totalQuantity.toString()}`, `Snapshot: ${snapshotAt.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC")}`, "Source: Alchemy NFT API"].join("\n"),
       files: [attachment],
     });
+    console.log("[holders]", { ...logContext, totalQuantity: result.totalQuantity.toString(), normalizedQuantity: result.metrics.normalizedQuantity.toString(), durationMs: Date.now() - startedAt, status: "success" });
   } catch (e) {
-    console.error("holders command error:", e?.message || e);
-    console.error(e);
+    const category = e instanceof HoldersAlchemyError ? e.category : "unexpected";
+    const safeDetails = e instanceof HoldersAlchemyError ? e.details : {};
+    console.error("[holders]", { ...logContext, ...safeDetails, category, durationMs: Date.now() - startedAt, status: "failure", message: e?.message || String(e) });
+    const content = category === "authentication"
+      ? "Alchemy rejected the configured NFT API credentials. No snapshot was generated."
+      : category === "configuration"
+        ? "Holder snapshots are unavailable because the Alchemy NFT API is not configured."
+        : category === "empty_result"
+          ? "Alchemy returned no ownership data for this contract or token. No snapshot was generated because the result may be incomplete."
+          : category === "validation"
+            ? e.message
+            : "Alchemy could not return complete ownership data for this contract. No snapshot was generated.";
     await interaction.editReply({
-      content: "Error generating holders CSV.",
+      content,
     });
   } finally {
     safeDeleteFile(tempCsvPath);
+    holdersExportInFlight = false;
   }
 }
 

@@ -7,7 +7,7 @@ A Node.js Discord bot that:
 3) Posts auction lifecycle alerts (piece revealed, first bid, new bid, auction ended) to a Discord “auction” channel for auction-based collections.
 4) Writes every detected mint into a monthly CSV ledger on a persistent Railway volume.
 5) On the 1st of each month, posts the previous month’s CSV into a Discord channel (“ledger-csv”).
-6) Provides a slash command `/ledgercsv` to fetch any month’s CSV on-demand.
+6) Provides slash commands for ledger downloads and fresh NFT holder snapshots.
 
 This is designed to be robust and restart-safe via persisted state on `/data`.
 
@@ -95,6 +95,7 @@ For future video tokens, add a poster file and a matching `mediaPosters` entry. 
 - `DISCORD_BOT_TOKEN`       Discord bot token
 - `GUILD_ID`                Guild for registering slash commands (guild-scoped)
 - `RPC_HTTP_URL`            Ethereum RPC URL (Alchemy)
+- `ALCHEMY_NFT_API_KEY`     Dedicated Alchemy NFT API key used only by `/holders`
 - `DATA_DIR`                Must be `/data` (Railway volume mount)
 - `POLL_MS`                 Poll interval ms (example 60000)
 - `CONFIRMATIONS`           Confirmation depth (example 2)
@@ -149,7 +150,12 @@ Notes:
 - `/ledgercsv` with optional `month` (YYYY-MM)
 Returns `mints-YYYY-MM.csv` from `/data/ledger`.
 
-This is the primary “sanity check” mechanism.
+- `/holders contract:<address>` exports a current ERC-721 or ERC-1155 whole-contract snapshot.
+- `/holders contract:<address> token_id:<id>` exports one ERC-1155 token ID. ERC-721 token-specific exports are rejected.
+
+`/holders` uses Alchemy NFT API v3 `getOwnersForContract` with token balances for every supported mode. Token-specific ERC-1155 snapshots include only balances matching the requested token ID. The CSV contains exactly `wallet,quantity`, where quantity is collection-wide NFT count for ERC-721, total units across token IDs for whole-contract ERC-1155, or units of the selected ERC-1155 token.
+
+Holder snapshots do not persist ownership state and do not reconstruct ownership from historical transfer logs. Alchemy is the only ownership source: incomplete, empty, malformed, timed-out, or failed API results produce no CSV and have no onchain fallback. Metadata and trait filtering are intentionally out of scope.
 
 ---
 

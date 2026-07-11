@@ -32,8 +32,17 @@ This file currently contains:
 - Discord posting helpers
 - shared Discord media resolution helpers for mint and sales embeds
 - poster override support for video NFT media
+- `/holders` command orchestration and NFT-standard detection
 
 Because this file is large, changes should be narrow and well targeted.
+
+## `holders-alchemy.js`
+
+Isolated Alchemy NFT API v3 ownership client for `/holders`. It owns complete pagination, bounded retry/timeout behavior, integer-safe aggregation, validation, CSV formatting, and timestamped filenames. It does not persist snapshots or fall back to onchain history.
+
+## `test/holders-alchemy.test.js`
+
+Mock-only focused tests for holder aggregation, pagination, failures, retries, CSV ordering, and filenames. Run with `npm test` or `npm run test:holders`; tests never call live Alchemy.
 
 ## `config.json`
 
@@ -109,6 +118,13 @@ Guardrail:
 - do not assume Alchemy is fully trustworthy
 - preserve working onchain sales behavior
 - use `/salescatchup` for no-skip lag recovery; `/salesfastforward` is emergency-only and skips unchecked sales blocks
+
+## Holder snapshots
+
+Purpose:
+- export fresh current ownership for allowlist and snapshot workflows
+
+The command supports ERC-721 whole-contract, ERC-1155 whole-contract, and ERC-1155 specific-token snapshots. Every mode uses Alchemy NFT API v3 `getOwnersForContract` with token balances; token-specific ERC-1155 snapshots filter those balances by token ID. CSV columns are `wallet,quantity`; historical reconstruction, persistent holder state, automatic fallback, and metadata filtering are intentionally excluded.
 
 ---
 

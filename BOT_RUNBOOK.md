@@ -182,6 +182,16 @@ Sales behavior is intentionally separate from mint behavior.
 
 ## Common Troubleshooting
 
+## Problem: `/holders` cannot generate a snapshot
+
+Check:
+- `ALCHEMY_NFT_API_KEY` is configured separately from `RPC_HTTP_URL`
+- startup/runtime logs for the structured `[holders]` failure category
+- whether another holder export is already active (the command permits one at a time)
+- Alchemy authentication, rate-limit, or service health
+
+`/holders` uses Alchemy NFT API v3 as its only ownership source. It retries bounded temporary failures, but it will not generate partial/empty CSVs and will not fall back to historical transfer-log reconstruction. Supported modes are ERC-721 whole contract, ERC-1155 whole contract, and ERC-1155 specific token ID. Metadata filtering is not currently supported.
+
 ## Problem: mint polling works but sales polling does not appear in logs
 
 Check:
