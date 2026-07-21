@@ -164,6 +164,12 @@
       "artist": "Various Artists",
       "standard": "erc1155",
       "contractAddress": "0x6b1479a88695de864940e77477811205a3d52388"
+    },
+    {
+      "name": "This Was Us",
+      "artist": "Andrea Ciulu",
+      "standard": "erc721",
+      "contractAddress": "0x210cfccd9bc218200eddcb49c67064351cc27c33"
     }
   ]
 }
