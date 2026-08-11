@@ -176,6 +176,12 @@
       "artist": "Andrea Ciulu",
       "standard": "erc721",
       "contractAddress": "0x210cfccd9bc218200eddcb49c67064351cc27c33"
+    },
+    {
+      "name": "Luminaries",
+      "artist": "Dario Lanza",
+      "standard": "erc721",
+      "contractAddress": "0x73D9AC8Dd051597788B76606011beF8941AA24e8"
     }
   ]
 }
