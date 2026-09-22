@@ -183,6 +183,12 @@
       "artist": "Dario Lanza",
       "standard": "erc721",
       "contractAddress": "0x73D9AC8Dd051597788B76606011beF8941AA24e8"
+    },
+    {
+      "name": "When All I Had Was Stars",
+      "artist": "Pho",
+      "standard": "erc1155",
+      "contractAddress": "0x7eF98feA6FB32e612dd4E5ad6af8b56d23468978"
     }
   ]
 }
