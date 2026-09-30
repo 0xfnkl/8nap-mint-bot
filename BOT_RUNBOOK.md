@@ -12,6 +12,8 @@ Use it to:
 
 This is not the full architecture history. That belongs in `8NAP_BOT_Handoff.md`.
 
+Daily spreadsheet sync and collection discovery have a separate setup and staged activation guide in [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md). Both are disabled by default; Google access in this chat does not authorize the independent Railway runtime.
+
 ---
 
 ## Core Principles
@@ -79,6 +81,7 @@ This overwrites `current-diff.md` with:
 - timestamp
 - command used
 - current uncommitted diff in a fenced `diff` block
+- new non-ignored files, without needing to stage them
 
 ### Notes
 

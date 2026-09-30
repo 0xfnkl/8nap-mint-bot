@@ -5,6 +5,8 @@ const path = require("path");
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 const { ethers } = require("ethers");
 const { HoldersAlchemyError, fetchHolderSnapshot, buildHoldersCsv, holdersFilename } = require("./holders-alchemy");
+const { createMintLedger, aggregateErc1155Batch } = require("./mint-ledger");
+const { createBotAutonomy } = require("./bot-autonomy");
 
 // =========================
 // Config + Env validation
@@ -535,46 +537,9 @@ function csvEscape(v) {
   return s;
 }
 
-function ensureLedgerHeader(filePath) {
-  if (fs.existsSync(filePath)) return;
-  const header = [
-    "DateUTC",
-    "ProjectKey",
-    "Collection",
-    "Standard",
-    "Quantity",
-    "MinterWallet",
-    "ETHPrice",
-    "TokenID",
-    "Contract",
-    "TxHash",
-    "BlockNumber",
-    "LogIndex",
-  ].join(",") + "\n";
-  fs.writeFileSync(filePath, header);
-}
-
+const mintLedger = createMintLedger(LEDGER_DIR);
 function appendMintToLedger(row, timestampMs) {
-  const monthKey = monthKeyFromMs(timestampMs);
-  const filePath = ledgerPathForMonth(monthKey);
-  ensureLedgerHeader(filePath);
-
-  const line = [
-    row.DateUTC,
-    row.ProjectKey,
-    row.Collection,
-    row.Standard,
-    row.Quantity,
-    row.MinterWallet,
-    row.ETHPrice,
-    row.TokenID,
-    row.Contract,
-    row.TxHash,
-    row.BlockNumber,
-    row.LogIndex,
-  ].map(csvEscape).join(",") + "\n";
-
-  fs.appendFileSync(filePath, line);
+  return mintLedger.append(row, timestampMs);
 }
 
 function salesLedgerPathForMonth(monthKey) {
@@ -815,7 +780,11 @@ async function decodeErc721SeaportEthLikeSalePrice(candidate, receipt) {
   return { salePriceNative: "", currencySymbol: "" };
 }
 
-const mintPollingCollections = config.collections.filter((collection) => !isIssuesSalesCollection(collection));
+let automation = null;
+function mintCollectionsConfig() {
+  const collections = automation ? automation.mintCollections() : config.collections;
+  return collections.filter((collection) => !isIssuesSalesCollection(collection));
+}
 
 function normalizeErc721OnchainCandidateToSales(candidate, collection) {
   const transfers = Array.isArray(candidate?.transfers) ? candidate.transfers : [];
@@ -1700,7 +1669,7 @@ async function pollSalesOnce() {
     return { advancedAny: false };
   }
 
-  const collections = Array.isArray(salesConfig.collections) ? salesConfig.collections : [];
+  const collections = salesCollectionsConfig();
   if (collections.length === 0) {
     console.log("[sales] poll skipped: no sales collections configured");
     return { advancedAny: false };
@@ -1790,7 +1759,7 @@ function memberIsAdmin(interaction) {
 }
 
 function salesCollectionsConfig() {
-  return Array.isArray(config?.sales?.collections) ? config.sales.collections : [];
+  return automation ? automation.salesCollections() : (Array.isArray(config?.sales?.collections) ? config.sales.collections : []);
 }
 
 function findSalesCollectionByInput(value) {
@@ -1998,7 +1967,7 @@ client.on("interactionCreate", async (interaction) => {
         "---- | -------- | --------- | ------------------",
       ];
 
-      for (const collection of config.collections) {
+      for (const collection of mintCollectionsConfig()) {
         const st = loadState(collection.contractAddress);
         const name = String(collection.name || "").slice(0, 32);
         const standard = String(collection.standard || "").toLowerCase();
@@ -2036,6 +2005,7 @@ client.on("interactionCreate", async (interaction) => {
 
       const fullContent = [
         mintContent,
+        ...(automation ? ["", "Automation", ...automation.status()] : []),
         "",
         "Sales monitoring",
         "```",
@@ -2047,6 +2017,9 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.editReply({ content: fullContent });
       } else {
         await interaction.editReply({ content: mintContent });
+        if (automation) {
+          await interaction.followUp({ content: ["Automation", ...automation.status()].join("\n").slice(0, 1900), ephemeral: true });
+        }
         let chunkRows = salesRows.slice(0, 2);
         for (const row of salesRows.slice(2)) {
           const candidate = [
@@ -3020,16 +2993,15 @@ async function postMint(collection, standard, contract, tokenId, to, txHash, blo
     videoUrl = media.videoUrl;
   }
 
-// tx value (or override)
-let priceEth = "0";
-try {
+  // A failed RPC read must retry the event rather than record an invented zero price.
+  let priceEth;
   if (overridePriceWei != null) {
     priceEth = ethers.formatEther(overridePriceWei);
   } else {
     const tx = await provider.getTransaction(txHash);
-    if (tx?.value != null) priceEth = ethers.formatEther(tx.value);
+    if (tx?.value == null) throw new Error("Mint transaction price unavailable");
+    priceEth = ethers.formatEther(tx.value);
   }
-} catch {}
 
   let priceLine = `Price: **${priceEth} ETH**`;
   const ethUsd = await getEthPriceUsd();
@@ -3042,11 +3014,9 @@ try {
   const minterDisplay = await formatDisplayAddress(to);
 
   // timestamp
-  let timestampMs = Date.now();
-  try {
-    const block = await provider.getBlock(blockNumber);
-    if (block?.timestamp) timestampMs = block.timestamp * 1000;
-  } catch {}
+  const block = await provider.getBlock(blockNumber);
+  if (!block?.timestamp) throw new Error("Mint block timestamp unavailable");
+  const timestampMs = block.timestamp * 1000;
 
     // ===== Ledger append (disk, no extra RPC) =====
   const dateUtc = new Date(timestampMs).toISOString();
@@ -3059,8 +3029,7 @@ try {
     ? `${contractLower}:${tokenIdStr}`
     : contractLower;
 
-  // Note: For ERC1155 batch mints, tx.value is total tx value, not per-token.
-  // We still record it as ETHPrice for auditability.
+  // ERC1155 ETHPrice is the row's allocated payment for its entire quantity.
   appendMintToLedger(
     {
       DateUTC: dateUtc,
@@ -3396,7 +3365,9 @@ async function initializeStateToHeadIfEmpty(collection) {
   const st = loadState(collection.contractAddress);
   if (!st.lastProcessedBlock || st.lastProcessedBlock === 0) {
     const head = await provider.getBlockNumber();
-    st.lastProcessedBlock = head - CONFIRMATIONS;
+    st.lastProcessedBlock = collection.discoveryCatchup && Number.isSafeInteger(collection.startBlock)
+      ? Math.max(0, collection.startBlock - 1)
+      : head - CONFIRMATIONS;
     if (st.lastProcessedBlock < 0) st.lastProcessedBlock = 0;
     saveState(collection.contractAddress, st);
   }
@@ -3441,15 +3412,18 @@ async function pollOnce() {
   const safeHead = head - CONFIRMATIONS;
   if (safeHead <= 0) return;
 
-  for (const collection of mintPollingCollections) {
+  for (const collection of mintCollectionsConfig()) {
     if (!collection.contractAddress || !collection.standard) continue;
+
+    // Extra bounded windows are only for newly discovered collections catching up from deployment.
+    for (let batch = 0; batch < (automation?.catchupBatches(collection) || 1); batch++) {
 
     const addr = collection.contractAddress;
     const standard = collection.standard.toLowerCase();
     console.log(`[pollOnce] collection=${collection.name} addr=${addr}`);
     const st = loadState(addr);
     const fromBlock = st.lastProcessedBlock + 1;
-    if (fromBlock > safeHead) continue;
+    if (fromBlock > safeHead) break;
 
     const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);
 
@@ -3500,7 +3474,7 @@ async function pollOnce() {
     } catch (e) {
       console.error(`❌ getLogs failed for ${collection.name} ${fromBlock}-${toBlock}:`, e.message);
       // Do not advance cursor on failure
-      continue;
+      break;
     }
 
     // deterministic ordering before processing and commit decisions
@@ -3552,7 +3526,8 @@ if (!isAuction) {
 
       if (p.name === "TransferBatch") {
         const from = p.args.from;
-        const values = p.args.values;
+        // ethers Result inherits Array.values; use the positional ABI field.
+        const values = p.args[4];
         if (from.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
           let sum = 0n;
           for (const v of values) sum += BigInt(v.toString());
@@ -3751,10 +3726,9 @@ try {
     txValueCache[h] = txv;
   }
 
-  if (txv != null && units > 0n) {
-    overridePriceWei = txv / units; // per token
-  }
-} catch {}
+  if (txv == null || units <= 0n) throw new Error("Mint transaction value or unit count unavailable");
+  overridePriceWei = txv / units; // per token
+} catch (e) { throw new Error(`Mint price allocation failed: ${e.message}`); }
 
 await postMint(
   collection,
@@ -3785,6 +3759,8 @@ if (standard === "erc1155") {
       continue;
     }
 
+    if (value === 0n) { markProcessed(); continue; }
+
     // ERC1155: show TOTAL spent for this row (per-unit * quantity in this event)
     let overridePriceWei = null;
     try {
@@ -3798,12 +3774,10 @@ if (standard === "erc1155") {
         txValueCache[h] = txv;
       }
 
-      if (txv != null && units > 0n) {
-        const perUnitWei = txv / units;
-        const qty = BigInt(value.toString());
-        overridePriceWei = perUnitWei * qty;
-      }
-    } catch {}
+      if (txv == null || units <= 0n) throw new Error("Mint transaction value or unit count unavailable");
+      const qty = BigInt(value.toString());
+      overridePriceWei = txv * qty / units;
+    } catch (e) { throw new Error(`Mint price allocation failed: ${e.message}`); }
 
     await postMint(
       collection,
@@ -3821,14 +3795,16 @@ if (standard === "erc1155") {
     const from = parsed.args.from;
     const to = parsed.args.to;
     const ids = parsed.args.ids;
-    const values = parsed.args.values;
+    const values = parsed.args[4];
 
     if (from.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) {
       markProcessed();
       continue;
     }
 
-    for (let i = 0; i < ids.length; i++) {
+    // The same token ID may occur more than once in one TransferBatch log.
+    // Record one aggregate per event ID, including all of that token's units/payment.
+    for (const { tokenId, quantity } of aggregateErc1155Batch(ids, values)) {
       // ERC1155: show TOTAL spent for this row (per-unit * quantity for this id)
       let overridePriceWei = null;
       try {
@@ -3842,23 +3818,20 @@ if (standard === "erc1155") {
           txValueCache[h] = txv;
         }
 
-        if (txv != null && units > 0n) {
-          const perUnitWei = txv / units;
-          const qty = BigInt(values[i].toString());
-          overridePriceWei = perUnitWei * qty;
-        }
-      } catch {}
+        if (txv == null || units <= 0n) throw new Error("Mint transaction value or unit count unavailable");
+        overridePriceWei = txv * quantity / units;
+      } catch (e) { throw new Error(`Mint price allocation failed: ${e.message}`); }
 
       await postMint(
         collection,
         "erc1155",
         contract,
-        ids[i],
+        tokenId,
         to,
         log.transactionHash,
         log.blockNumber,
         log.index,
-        values[i],
+        quantity,
         overridePriceWei
       );
     }
@@ -3917,6 +3890,8 @@ if (standard === "erc1155") {
       st.lastBidderByToken = latestBidder ?? st.lastBidderByToken ?? {};
     }
     saveState(addr, st);
+    if (failedLog) break;
+    }
   }
 }
 
@@ -4024,13 +3999,13 @@ let salesPollInFlight = false;
 async function startPolling() {
   console.log("[startup:startPolling] entering startPolling()");
   // initialize cursors to safe head on first boot, to avoid posting historical spam
-  for (const collection of mintPollingCollections) {
+  for (const collection of mintCollectionsConfig()) {
     console.log(`[startup:startPolling] before initializeStateToHeadIfEmpty collection=${collection.name}`);
     await initializeStateToHeadIfEmpty(collection);
     console.log(`[startup:startPolling] after initializeStateToHeadIfEmpty collection=${collection.name}`);
   }
 
-  const salesCollections = Array.isArray(config?.sales?.collections) ? config.sales.collections : [];
+  const salesCollections = salesCollectionsConfig();
   if (config?.sales?.enabled === true) {
     for (const collection of salesCollections) {
       console.log(`[startup:startPolling] before initializeSalesStateNearHead collection=${collection.name}`);
@@ -4111,6 +4086,7 @@ async function shutdown(signal) {
   console.log(`🛑 Shutting down (${signal})...`);
   if (pollTimer) clearInterval(pollTimer);
   if (salesPollTimer) clearInterval(salesPollTimer);
+  if (automation) automation.stop();
   process.exit(0);
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -4124,6 +4100,16 @@ process.on("uncaughtException", (err) => {
 });
 
 const LEDGER_CSV_CHANNEL_ID = process.env.LEDGER_CSV_CHANNEL_ID || "1463682240671387952";
+automation = createBotAutonomy({
+  config, stateDir: STATE_DIR, ledger: mintLedger, provider, confirmations: CONFIRMATIONS,
+  mintCollections: config.collections.filter((collection) => !isIssuesSalesCollection(collection)),
+  loadMintState: loadState, initializeMint: initializeStateToHeadIfEmpty,
+  initializeSales: initializeSalesStateNearHead,
+  alert: async (message) => {
+    const channel = await client.channels.fetch(config.sales?.salesAlertChannelId || "1432785087828852776");
+    await rateLimiter.send(channel, { content: `**Bot automation needs attention**\n${message}`.slice(0, 1900), allowedMentions: { parse: [] } });
+  },
+});
 const DISCORD_STARTUP_TIMEOUT_MS = 60000;
 const DISCORD_LOGIN_BACKOFF_MIN_MS = 5000;
 const DISCORD_LOGIN_BACKOFF_MAX_MS = 20000;
@@ -4159,6 +4145,7 @@ client.once("clientReady", async () => {
     console.log("[startup] about to run startPolling()");
     await startPolling();
     console.log("[startup] startPolling() completed");
+    automation.start();
 
     if (process.env.SALES_RESET_STATE_ON_READY === "1") {
       console.log("[sales] canary sales state reset scheduled");

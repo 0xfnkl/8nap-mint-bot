@@ -1,6 +1,25 @@
 {
   "discordChannelId": "1445238979937964154",
   "auctionChannelId": "1445850576255451367",
+  "sheetSync": {
+    "enabled": false,
+    "mode": "dry-run",
+    "spreadsheetId": "1IeEwkHSszOKJouByE63brOCdCQLsXBe76r1dSuRgZlE",
+    "timeZone": "America/Vancouver",
+    "hour": 21,
+    "maxRows": 12000
+  },
+  "collectionDiscovery": {
+    "enabled": false,
+    "mode": "observe",
+    "autoAdd": false,
+    "autoRetire": false,
+    "timeZone": "America/Vancouver",
+    "hour": 20,
+    "maxAdditionsPerScan": 5,
+    "maxMintCatchupBlocks": 10000,
+    "mintCatchupBatchesPerPoll": 10
+  },
   "mediaPosterBaseUrl": "https://raw.githubusercontent.com/0xfnkl/8nap-mint-bot/main/media-posters",
   "mediaPosters": {
     "0x6b1479a88695de864940e77477811205a3d52388": {

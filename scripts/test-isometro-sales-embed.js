@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { createRequire } = require("module");
 
 const repoRoot = path.join(__dirname, "..");
 const indexPath = path.join(repoRoot, "index.js");
@@ -142,7 +143,7 @@ const testSource = `
 vm.runInNewContext(
   `${source.slice(0, cut)}\n${testSource}`,
   {
-    require,
+    require: createRequire(indexPath),
     console,
     process,
     __dirname: repoRoot,

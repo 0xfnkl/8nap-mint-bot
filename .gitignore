@@ -2,3 +2,6 @@ node_modules
 .env
 .DS_Store
 current-diff.md
+data/
+service-account*.json
+google-credentials*.json

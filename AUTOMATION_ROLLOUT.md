@@ -1,0 +1,100 @@
+# Daily mint reporting and collection discovery
+
+## Current status
+
+Both features are disabled in `config.json`. External review is clear, all 84 tests pass, and the independent backups and live preflight checks below are complete. The first code deployment keeps automation disabled; activation follows the staged sequence in this guide. The existing monthly CSV files and Discord report schedule remain in place. This adds scheduled code to the existing Railway bot; it does not schedule an AI agent or add another hosting service.
+
+The target workbook is **8NAP ART — Projects & Sales V2**:
+https://docs.google.com/spreadsheets/d/1IeEwkHSszOKJouByE63brOCdCQLsXBe76r1dSuRgZlE/edit
+
+A separate validation copy contains one clearly marked synthetic test event, not a real mint:
+https://docs.google.com/spreadsheets/d/1bWFtNl7FlBx4OP0isP9TDj06nJFmVRqvjquFTBIxg-4/edit
+
+## Runtime behavior
+
+- **20:00 America/Vancouver:** scan `https://8nap.art/collections` once daily. Parse the structured website data and verify contract standards onchain. Preserve existing collection names, metadata, auction settings, and mint/sales cursors.
+- **21:00 America/Vancouver:** reconcile all available monthly mint ledger files against the sheet's existing event IDs. Append missing events only. With no missing events, write no Google cells. Sales after the cutoff are included in the next successful run. Monthly CSVs use UTC months, as before.
+- Daily jobs persist an unfinished slot before starting work and clear it after successful completion. A restart recovers interrupted work before the next scheduled hour, including a first-ever attempt with no success or error history. Older first-attempt state is also recovered. Recovery coalesces multiple missed days into the most recent due slot. Failures retain the unfinished slot and retry after 15 minutes, with an admin alert at most every six hours for continued failures. Changed review items produce an alert once and remain visible in `/status`.
+- Vancouver uses permanent UTC−7 after 8 March 2026, including deployments with older ICU timezone data. See the [B.C. announcement](https://news.gov.bc.ca/releases/2026AG0013-000209).
+
+The Google importer owns only `Raw Imports` columns A:M and O:Q and appended `Import Log` rows. Column N, dashboard formulas, wallet rules, corrections, project setup, and phase rules remain owned by the workbook. Destination checks use formula-rendered values, so a formula displaying an empty string still counts as occupied and cannot be overwritten. It checks the live 17-column V2 schema and its 12,000-row formula capacity before writing, then reads each batch back and checks the event ID, quantities, ETH values, and audit log. It checks `Reporting Checks` after reconciliation and alerts on unresolved issues. New project metadata and phase definitions still need occasional review; the bot does not invent classification rules or launch dates.
+
+An event ID includes contract, transaction hash, log index, and token ID. Repeated IDs within one ERC-1155 TransferBatch are aggregated before allocating ETH and writing one row per token ID. Both local CSV appends and sheet imports deduplicate these event IDs. A timeout after an accepted Google write is reconciled from the reserved rows before another write. Each workbook has separate import journals and daily schedule files; recovery checks the spreadsheet ID on both the journal and pending batch before contacting Google. Switching from validation to production leaves a pending validation write available for recovery against the validation copy. Existing manually corrected amounts are preserved. Conflicting local ledger rows stop processing for investigation instead of choosing an amount.
+
+New mint contracts start at a verified deployment block, with at most 10,000 historical blocks accepted automatically and ten polling windows per poll. This also applies to collections that launched and sold out between daily scans: their history is backfilled before retirement or flagged for review if unsupported or over budget. The combined addition limit is checked before initializing any mint or sales cursors. Historical collections requiring review do not consume that automatic-addition budget. New sales tracking starts near the current head using the existing sales behavior; it does not backfill old secondary sales. Existing supported marketplace/transaction shapes are unchanged. Unknown auctions or excessive mint history produce review items. If a discovered fixed-price contract later enters an unknown auction phase, its automatic mint tracking pauses until manual auction configuration is supplied; sales tracking and its mint cursor remain.
+
+Sold-out retirement requires two successful website observations at least 20 hours apart, supply verified at a confirmed chain block, the mint cursor reaching the retirement barrier, and no pending auction settlement. Changes to supply, supply caps, or edition IDs reset both observations and the barrier. Edition reordering alone does not reset them. An already retired contract reactivates when its supply snapshot changes, even if a later edition has also sold out before the scan. A pending reactivation persists through observation mode, disabled automatic retirement, unchanged later scans, and restarts; it clears only when applied. Reactivation starts fresh retirement observations and preserves the mint cursor for catch-up. Registry entries without a supply snapshot start fresh observations on their next successful scan. It disables mint polling only. Sales tracking, ledger history, and state files remain. Unavailable or unsupported supply reads preserve tracking and trigger retry/attention. Incomplete or changed website data never removes collections.
+
+## Google access
+
+The connected Drive account can edit the workbook in this chat. Railway requires an independent credential to operate when this chat is closed.
+
+The connected owner account is `0xfnkl@gmail.com`. The approved bot service account is `id-nap-mint-bot@nap-mint-bot.iam.gserviceaccount.com`; Editor access to the validation workbook has been granted and verified. Its JSON key is stored outside the repository at `/Users/jessefinkle/.config/8nap-mint-bot/service-account.json`, with directory permissions 700 and file permissions 600. The user saved `GOOGLE_SERVICE_ACCOUNT_JSON` in Railway and its staged change was applied. A check inside the restarted service verified the expected service-account identity, JSON format, and private-key presence without printing the credential.
+
+1. In a Google Cloud project, enable the Google Sheets API and create a dedicated service account with a JSON key. It needs no broad Google Cloud project role or domain-wide delegation for this use.
+2. Share the validation copy with its `client_email` as **Editor**. Initially keep production access out of this credential.
+3. Set the full JSON as the Railway secret `GOOGLE_SERVICE_ACCOUNT_JSON`. Do not paste the key into Discord, code, review artifacts, or this document. The bot requests the Sheets scope; workbook sharing restricts which spreadsheets the account can reach.
+4. After validation, share only the production workbook with that service account as Editor and change `sheetSync.spreadsheetId` to the production ID above.
+
+Use one Railway replica and one importer for this workbook. Google Sheets cannot provide an atomic compare-and-swap for the reserved rows. Concurrent imports from another program or manual appends during a write could race. Keep manual corrections in the workbook's adjustment tabs; stop manual monthly CSV imports after daily sync is activated.
+
+## Rollout sequence
+
+1. Follow the repo's existing external review workflow using `current-diff.md` before commit/push. Back up the Railway persistent volume and production workbook. Run `npm test` and validate the actual Railway ledger before deploying the changed mint writer:
+
+   ```bash
+   DATA_DIR=/data npm run automation:check -- ledger
+   ```
+
+   This must succeed. In particular, investigate historical conflicting duplicate rows or incomplete CSV writes before rollout; do not delete them blindly.
+
+2. Deploy with both features disabled. Confirm normal mint, auction, sales, monthly report, and `/status` behavior.
+3. Enable `collectionDiscovery.enabled` in `observe` mode with both automatic flags false. It records proposed changes but does not change tracking. Enable `sheetSync.enabled` in `dry-run` mode against the validation ID. Confirm the Railway credential can read the real schema. The following command also checks the ledger against a sheet without writing Google cells:
+
+   ```bash
+   DATA_DIR=/data SHEET_VALIDATION_ID=1bWFtNl7FlBx4OP0isP9TDj06nJFmVRqvjquFTBIxg-4 npm run automation:check -- sheet
+   ```
+
+   Run it where the secret is configured. Dry-run planning records its daily slot; change modes before the next scheduled slot, rather than deleting persisted state.
+
+4. Change sheet mode to `apply` against the validation copy. Compare new records and `Reporting Checks` with the bot's CSV across several daily runs. Check a repeat/restart and an empty day. The copy already contains the synthetic fixture; exclude it when comparing real totals.
+5. Give the service account production workbook access and switch to its ID. Keep collection discovery in observation mode during the first production sheet runs. Verify event counts, recorded ETH, CSV archives, and alerts.
+6. After reviewing discovery proposals, change discovery mode to `apply` and enable `autoAdd`. Enable `autoRetire` after successful sold-out observations and cursor checks. Observe RPC usage and lag during the first additions.
+
+Live-site inspection on 30 September 2026 found 20 visible collections, all current minting collections present in mint config, and four missing from sales config: When All I Had Was Stars, Luminaries, Digital Mythology: 1 of 1 Series, and This Was Us. The first observed scan should explain these proposals and review older sold-out collections that are no longer in mint config. No static config additions were made during implementation.
+
+## Verification completed locally
+
+- 84 automated tests passed, including 24 new regression cases addressing the external review findings. Six cases cover the follow-up review: pending reactivation across mode/settings changes and restarts, an actual process exit during the first daily run followed by morning recovery, older first-attempt state, recovery backoff across restarts, missed-day coalescing, and fresh startup before the scheduled hour. Other coverage includes fast sell-outs, changed and already-retired editions, repeated batch IDs and partial posting retries, blank-displaying formulas, and workbook-specific recovery/schedules. The existing IsoMetro sale-embed regression check passed before these repairs; sale rendering is unchanged.
+- A live write to the validation copy added a synthetic ERC-1155 event of two pieces and 0.04 ETH. The derived event ID populated, the reporting checks remained `Passed`, and totals increased by exactly those amounts within spreadsheet floating-point precision. Re-running the import planner against the actual readback planned zero duplicate rows. Production workbook cells were untouched.
+- Dashboard cell formatting and computed reporting values were checked through the API. The in-app browser's signed-in Google account could not open the copy, so a browser-rendered visual check was unavailable.
+- The actual collections-page HTML parsed successfully. The unit/integration suite uses mocks and does not log into Discord. Live preflight results are recorded below; production scheduling and Google writes from Railway remain deployment checks.
+
+## Live preflight completed on 30 September 2026
+
+- The stored service-account key authenticated against the validation workbook using the bot's actual Sheets client. The schema/formula-capacity checks passed and `Reporting Checks` returned no review items. This was a read-only check with zero input ledger records; it does not establish how many real Railway events need importing.
+- A private backup of the production workbook was created and verified under `0xfnkl@gmail.com`: [8NAP ART — Projects & Sales V2 — Backup before bot rollout — 2026-09-30](https://docs.google.com/spreadsheets/d/10kl6uXoNMXs37aPso9crf7vc8jc9_2AEevAB_CLrqFg/edit). Only the owner appears in the backup's permission readback.
+- Railway project `2fc43de3-2f63-4a05-914d-d5d8dd652688`, production environment `26563d9b-d6e7-4d5e-8814-27a6d0214653`, service `d697d61a-6137-402a-93f3-466e9f7b93db` was accessed through its existing signed-in web console. `DATA_DIR=/data`, RPC configuration is present, and the Google credential is absent from the running process.
+- The reviewed mint-ledger reader checked the actual `/data/ledger` files in that console: nine monthly CSVs, January–September 2026, containing 1,486 unique events. Validation passed without conflicting records. The helper was uploaded to `/tmp`; the running application and its cursors were not replaced or reset.
+- A gzip snapshot of `/data` was created before preflight and copied to `/data/backups/8nap-data-before-autonomy-20260930.tar.gz`. The user downloaded it to `/Users/jessefinkle/Downloads/8nap-data-before-autonomy-20260930.tar.gz`. Its archive listing passed, its 514,734-byte size matched, and its SHA-256 matched Railway: `11617826c12530b7479d20d363db714034dc10985e801d83c828a1aaafbb8454`. An additional private local copy is retained at `/Users/jessefinkle/8nap-mint-bot/data/backups/8nap-data-before-autonomy-20260930.tar.gz` with file permissions 600 in an ignored directory. The independent backup prerequisite is complete. Railway's managed-backup UI currently requires Pro; no plan upgrade was made.
+- The reviewed discovery module was run in observation mode in the live console against the real website and Railway RPC, with a registry only in `/tmp` and initializers that throw if called. The scan succeeded with 20 collections, four sales additions, and no mint additions, retirements, or reactivations applied. Proposed sales additions: When All I Had Was Stars, Luminaries, Digital Mythology: 1 of 1 Series, and This Was Us by Andrea Ciulu. Eight old mint histories exceeded the catch-up budget; Echoes, Issues, and IsoMetro required auction review. These review items must not be turned into automatic history imports without a separate assessment.
+- The user completed the required credential-entry handoff. The saved Railway change was applied successfully in deployment `070643cc-85ad-4524-b949-bfe33fc34304`, using the existing bot source. The restarted service is online; the expected credential is present and valid, all nine monthly ledger files remain, and the persistent backup remains. Its value was not revealed during verification.
+- The full importer dry run against the validation workbook used the verified backup's 1,486 real mint events and the bot service-account key. It planned 45 missing events beginning at row 3,958; `Reporting Checks` returned no review items. No spreadsheet cells were written by this check.
+- Next: deploy the reviewed code with automation disabled and repeat the full sheet dry run from Railway before enabling scheduled writes.
+
+## Cost and limits
+
+There are no runtime AI calls and no extra server. Standard Sheets API usage has no additional cost under its [published limits](https://developers.google.com/workspace/sheets/api/limits); Google notes that over-quota billing is planned later in 2026. The importer limits runs to six batches of 500 events and fewer than 60 Google reads per run. A larger initial backlog preserves verified batches and resumes after the retry delay. It stops rather than writing beyond the workbook's formula capacity.
+
+Daily website discovery is one HTTP fetch, with RPC validation/deployment/supply reads as needed. Each added collection increases ongoing mint and/or sales polling, so Ethereum RPC usage can increase; consult [Alchemy's compute-unit costs](https://www.alchemy.com/docs/reference/compute-unit-costs) and the actual account's usage. Retirement can reduce mint polling. No exact billing guarantee is possible without observing the deployed workload and current plan.
+
+## Pause, rollback, and troubleshooting
+
+- Set `sheetSync.enabled` false to pause sheet updates. Existing rows and monthly CSVs remain. Re-enabling reconciles the backlog.
+- Set `autoAdd` false to freeze further automatic additions while keeping existing applied registry entries. Set `autoRetire` false to restore manual mint entries without removing sales tracking.
+- Setting `collectionDiscovery.enabled` false reverts effective monitoring to static config, including removal of registry-only additions. Copy any required discovered entries into static config before doing a full discovery rollback. Preserve their state files and deployment start block.
+- Inspect `/status`, Railway automation logs, `/data/state/{collection_registry,discovery_job}.json`, and the target's `sheet_sync_job-<spreadsheetId>.json` / `sheet_sync_state-<spreadsheetId>.json`. The CLI uses `sheet_check_state-<spreadsheetId>.json`. Do not delete pending sheet state after a timeout: it is needed to reconcile the potentially accepted write.
+- Legacy pending journals without a spreadsheet ID cannot be recovered automatically. Preserve them and identify their original workbook before a reviewed migration; do not copy them into production's journal or guess their target.
+- Batch aggregation fixes future recording and retry behavior. Any historical rows that were already undercounted require receipt-based reconciliation; these repairs do not rewrite archived CSVs or existing spreadsheet records.
+- A full Raw Imports/Import Log or changed formula/schema requires a reviewed workbook change before resuming. Missing phase/project definitions require workbook setup. A malformed registry, missing website collections, or unknown auction type requires investigation; existing monitoring is preserved.
+- These changes protect ledger/sheet records from duplicates, not exactly-once delivery to Discord. A Discord response lost after delivery can still lead to a repeated alert. Monthly CSV reporting retains the existing poster's behavior; historical report delivery and previously corrected auction records are not rewritten by this change.

@@ -40,6 +40,17 @@ Because this file is large, changes should be narrow and well targeted.
 
 Isolated Alchemy NFT API v3 ownership client for `/holders`. It owns complete pagination, bounded retry/timeout behavior, integer-safe aggregation, validation, CSV formatting, and timestamped filenames. It does not persist snapshots or fall back to onchain history.
 
+## Daily automation modules
+
+- `bot-autonomy.js`: optional runtime integration, configuration isolation, status, and admin alerts.
+- `daily-jobs.js`: persisted daily scheduling, retry, timezone handling, and atomic JSON state.
+- `mint-ledger.js`: validated monthly CSV append/read and event-ID deduplication across retries/restarts.
+- `sheets-sync.js`: the live V2 workbook schema, fixed-range appends, write reconciliation/readback, and reporting checks.
+- `collection-discovery.js`: structured 8NAP catalog parsing, verified additions, conservative mint retirement, and a persisted overlay separate from manual config.
+- `scripts/check-autonomy.js`: read-only catalog, ledger, and sheet preflight commands.
+- `test/{autonomy,collection-discovery,mint-polling}.test.js`: failure/restart and actual polling integration tests, with no live Discord/Google/RPC calls.
+- `AUTOMATION_ROLLOUT.md`: credential setup, staged activation, limits, and rollback.
+
 ## `test/holders-alchemy.test.js`
 
 Mock-only focused tests for holder aggregation, pagination, failures, retries, CSV ordering, and filenames. Run with `npm test` or `npm run test:holders`; tests never call live Alchemy.

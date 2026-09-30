@@ -1,5 +1,7 @@
 # 8NAP Mint Analytics Schema
 
+> Historical schema: this describes the earlier workbook. The current **8NAP ART — Projects & Sales V2** has 17 Raw Imports columns and a formula-driven Mint Ledger; the importer schema is in `sheets-sync.js`. See [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md) before modifying the live workbook. Column N is an existing event-ID ARRAYFORMULA and must not be overwritten.
+
 ## Purpose
 
 This spreadsheet is the canonical analytics system for tracking all mints across 8NAP ART projects.

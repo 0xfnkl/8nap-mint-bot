@@ -11,6 +11,16 @@ A Node.js Discord bot that:
 
 This is designed to be robust and restart-safe via persisted state on `/data`.
 
+## Daily automation implementation — 30 September 2026
+
+Optional daily collection discovery at 20:00 and mint sheet reconciliation at 21:00 America/Vancouver have been added, disabled by default pending review and runtime credential setup. Read [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md) for exact rollout steps and verified workbook IDs.
+
+Daily jobs persist an unfinished slot before running, so an interrupted first attempt recovers on a morning restart. Failures preserve that marker and retry backoff; success clears it. Missed days coalesce to the latest due slot. Collection reactivations remain pending through observation mode or disabled automatic retirement and clear only when applied, preserving catch-up across restarts.
+
+Manual collection config remains authoritative. Applied discoveries live in a separate persisted registry; sold-out mint retirement preserves sales tracking, history, and cursors. Newly discovered sold-out collections receive the same bounded history check/backfill as minting collections. Supply/edition changes invalidate retirement observations and reactivate retired contracts for catch-up. New mint history is bounded and verified from deployment, while sales initialize near head. The mint writer now validates and deduplicates monthly CSV event IDs; failed price/timestamp reads retry rather than recording fallback values. ERC-1155 batch decoding uses the positional values field to avoid the ethers Result Array.values collision, and aggregates repeated token IDs within each log before allocating payment.
+
+The sheet importer targets the actual 17-column V2 Raw Imports layout, preserves column N's event-ID formula and historical corrections, and verifies every write. Formula-aware destination reads protect even formulas displaying blank. Import journals and daily schedule files are namespaced by spreadsheet ID; journal/pending identities are checked before recovery. It does not configure new project/phase rules automatically; reporting checks surface that review work. The older schema document below describes a previous workbook generation and must not be used as the importer layout.
+
 ---
 
 ## Temporary Note
