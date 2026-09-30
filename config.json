@@ -2,15 +2,15 @@
   "discordChannelId": "1445238979937964154",
   "auctionChannelId": "1445850576255451367",
   "sheetSync": {
-    "enabled": false,
-    "mode": "dry-run",
-    "spreadsheetId": "1IeEwkHSszOKJouByE63brOCdCQLsXBe76r1dSuRgZlE",
+    "enabled": true,
+    "mode": "apply",
+    "spreadsheetId": "1bWFtNl7FlBx4OP0isP9TDj06nJFmVRqvjquFTBIxg-4",
     "timeZone": "America/Vancouver",
     "hour": 21,
     "maxRows": 12000
   },
   "collectionDiscovery": {
-    "enabled": false,
+    "enabled": true,
     "mode": "observe",
     "autoAdd": false,
     "autoRetire": false,

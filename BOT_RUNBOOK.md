@@ -12,7 +12,7 @@ Use it to:
 
 This is not the full architecture history. That belongs in `8NAP_BOT_Handoff.md`.
 
-Daily spreadsheet sync and collection discovery have a separate setup and staged activation guide in [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md). Both are disabled by default; Google access in this chat does not authorize the independent Railway runtime.
+Daily spreadsheet sync and collection discovery have a separate setup and staged activation guide in [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md). The current trial writes to the validation workbook and observes collection changes; production sheet writes and automatic collection changes await the later rollout stages. Railway uses its own service-account credential and workbook permissions.
 
 ---
 
