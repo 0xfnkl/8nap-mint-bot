@@ -8,7 +8,7 @@ const { createCollectionRegistry } = require("./collection-discovery");
 function settings(value, defaults, modes) {
   const options = { ...defaults, ...value };
   if (typeof options.enabled !== "boolean" || !modes.includes(options.mode)) throw new Error("Invalid enabled flag or automation mode");
-  localSchedule(new Date(), options.timeZone, options.hour);
+  localSchedule(new Date(), options.timeZone, options.hour, options.minute);
   for (const field of ["maxRows", "maxAdditionsPerScan", "maxMintCatchupBlocks", "mintCatchupBatchesPerPoll"]) {
     if (options[field] !== undefined && (!Number.isSafeInteger(options[field]) || options[field] < 1)) throw new Error(`Invalid automation option ${field}`);
   }
@@ -21,18 +21,18 @@ function createBotAutonomy({ config, stateDir, ledger, provider, confirmations, 
   let registry;
   let discoveryOptions;
   try {
-    discoveryOptions = settings(config.collectionDiscovery, { enabled: false, mode: "observe", autoAdd: false, autoRetire: false, timeZone: "America/Vancouver", hour: 20, maxAdditionsPerScan: 5, maxMintCatchupBlocks: 10000, mintCatchupBatchesPerPoll: 10 }, ["observe", "apply"]);
+    discoveryOptions = settings(config.collectionDiscovery, { enabled: false, mode: "observe", autoAdd: false, autoRetire: false, timeZone: "America/Vancouver", hour: 20, minute: 0, maxAdditionsPerScan: 5, maxMintCatchupBlocks: 10000, mintCatchupBatchesPerPoll: 10 }, ["observe", "apply"]);
     registry = createCollectionRegistry({ file: registryFile, options: discoveryOptions, mintCollections, salesCollections: config.sales?.collections || [], loadMintState, provider, confirmations, initializeMint, initializeSales });
-    if (discoveryOptions.enabled) jobs.push(createDailyJob({ name: "collection discovery", file: path.join(stateDir, "discovery_job.json"), timeZone: discoveryOptions.timeZone, hour: discoveryOptions.hour, alert, log, run: date => registry.scan(date) }));
+    if (discoveryOptions.enabled) jobs.push(createDailyJob({ name: "collection discovery", file: path.join(stateDir, "discovery_job.json"), timeZone: discoveryOptions.timeZone, hour: discoveryOptions.hour, minute: discoveryOptions.minute, alert, log, run: date => registry.scan(date) }));
   } catch (e) { errors.push(`Collection discovery disabled: ${e.message}`); registry = null; }
   try {
-    const options = settings(config.sheetSync, { enabled: false, mode: "dry-run", timeZone: "America/Vancouver", hour: 21, maxRows: 12000 }, ["dry-run", "apply"]);
+    const options = settings(config.sheetSync, { enabled: false, mode: "dry-run", timeZone: "America/Vancouver", hour: 21, minute: 0, maxRows: 12000 }, ["dry-run", "apply"]);
     if (options.enabled) {
       let credentials;
       try { credentials = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}"); } catch { throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON"); }
       const client = new SheetsClient({ spreadsheetId: options.spreadsheetId, credentials });
       const paths = sheetStatePaths(stateDir, options.spreadsheetId);
-      jobs.push(createDailyJob({ name: "mint sheet sync", file: paths.jobFile, timeZone: options.timeZone, hour: options.hour, alert, log, run: date => syncMintSheet({ client, records: ledger.read(), stateFile: paths.stateFile, maxRows: options.maxRows, dryRun: options.mode !== "apply", now: date }) }));
+      jobs.push(createDailyJob({ name: "mint sheet sync", file: paths.jobFile, timeZone: options.timeZone, hour: options.hour, minute: options.minute, alert, log, run: date => syncMintSheet({ client, records: ledger.read(), stateFile: paths.stateFile, maxRows: options.maxRows, dryRun: options.mode !== "apply", now: date }) }));
     }
   } catch (e) { errors.push(`Sheet sync disabled: ${e.message}`); }
   let timer;

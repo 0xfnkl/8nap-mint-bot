@@ -18,17 +18,18 @@ function writeJson(file, value) {
   fs.renameSync(temp, file);
 }
 
-function localSchedule(now, timeZone, hour) {
+function localSchedule(now, timeZone, hour, minute = 0) {
   if (!Number.isInteger(hour) || hour < 0 || hour > 23) throw new Error("Daily job hour must be 0–23");
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) throw new Error("Daily job minute must be 0–59");
   // B.C. adopted permanent UTC−7 on 8 March 2026. This also protects deployments with older ICU timezone data.
   // https://news.gov.bc.ca/releases/2026AG0013-000209
   const zone = timeZone === "America/Vancouver" && now.getTime() >= Date.parse("2026-03-08T10:00:00Z") ? "Etc/GMT+7" : timeZone;
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" }).formatToParts(now).map(p => [p.type, p.value]));
-  return { day: `${parts.year}-${parts.month}-${parts.day}`, due: Number(parts.hour) >= hour };
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now).map(p => [p.type, p.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, due: Number(parts.hour) * 60 + Number(parts.minute) >= hour * 60 + minute };
 }
 
-function createDailyJob({ name, file, timeZone, hour, run, alert, now = () => new Date(), retryMs = 15 * 60 * 1000, log = console.log }) {
-  localSchedule(now(), timeZone, hour);
+function createDailyJob({ name, file, timeZone, hour, minute = 0, run, alert, now = () => new Date(), retryMs = 15 * 60 * 1000, log = console.log }) {
+  localSchedule(now(), timeZone, hour, minute);
   let inFlight = false;
   return {
     name,
@@ -37,7 +38,7 @@ function createDailyJob({ name, file, timeZone, hour, run, alert, now = () => ne
       if (inFlight) return;
       inFlight = true;
       try {
-        const current = now(), schedule = localSchedule(current, timeZone, hour), state = readJson(file, {});
+        const current = now(), schedule = localSchedule(current, timeZone, hour, minute), state = readJson(file, {});
         const priorDay = new Date(Date.parse(`${schedule.day}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
         const slot = schedule.due ? schedule.day : priorDay;
         const missed = state.lastCompletedDay && state.lastCompletedDay < slot;

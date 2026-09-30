@@ -13,7 +13,7 @@ This is designed to be robust and restart-safe via persisted state on `/data`.
 
 ## Daily automation implementation — 30 September 2026
 
-Optional daily collection discovery at 20:00 and mint sheet reconciliation at 21:00 America/Vancouver have been added, disabled by default pending review and runtime credential setup. Read [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md) for exact rollout steps and verified workbook IDs.
+Daily collection discovery at 23:00 in observation mode and mint sheet reconciliation at 23:30 against the validation copy are enabled in America/Vancouver. Production sheet writes and automatic collection changes await the later rollout stages. The scheduler accepts minute-level timing while preserving daily deduplication and recovery. Read [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md) for exact rollout steps and verified workbook IDs.
 
 Daily jobs persist an unfinished slot before running, so an interrupted first attempt recovers on a morning restart. Failures preserve that marker and retry backoff; success clears it. Missed days coalesce to the latest due slot. Collection reactivations remain pending through observation mode or disabled automatic retirement and clear only when applied, preserving catch-up across restarts.
 

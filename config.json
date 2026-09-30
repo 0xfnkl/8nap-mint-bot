@@ -6,7 +6,8 @@
     "mode": "apply",
     "spreadsheetId": "1bWFtNl7FlBx4OP0isP9TDj06nJFmVRqvjquFTBIxg-4",
     "timeZone": "America/Vancouver",
-    "hour": 21,
+    "hour": 23,
+    "minute": 30,
     "maxRows": 12000
   },
   "collectionDiscovery": {
@@ -15,7 +16,8 @@
     "autoAdd": false,
     "autoRetire": false,
     "timeZone": "America/Vancouver",
-    "hour": 20,
+    "hour": 23,
+    "minute": 0,
     "maxAdditionsPerScan": 5,
     "maxMintCatchupBlocks": 10000,
     "mintCatchupBatchesPerPoll": 10

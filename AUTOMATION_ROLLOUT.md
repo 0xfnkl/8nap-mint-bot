@@ -2,7 +2,7 @@
 
 ## Current status
 
-The current configuration runs daily sheet writes against the **validation copy** at 21:00 and collection discovery in **observation mode** at 20:00, both in America/Vancouver. Automatic collection additions and retirements remain false. External review is clear, all 84 tests pass, and the independent backups and live integration checks below are complete. Production sheet activation follows several successful daily validation runs. The existing monthly CSV files and Discord report schedule remain in place. This adds scheduled code to the existing Railway bot; it does not schedule an AI agent or add another hosting service.
+The current configuration runs daily sheet writes against the **validation copy** at 23:30 and collection discovery in **observation mode** at 23:00, both in America/Vancouver. Automatic collection additions and retirements remain false. External review of the original autonomy implementation is clear, and the independent backups and live integration checks below are complete. Production sheet activation follows several successful daily validation runs. The existing monthly CSV files and Discord report schedule remain in place. This adds scheduled code to the existing Railway bot; it does not schedule an AI agent or add another hosting service.
 
 The target workbook is **8NAP ART — Projects & Sales V2**:
 https://docs.google.com/spreadsheets/d/1IeEwkHSszOKJouByE63brOCdCQLsXBe76r1dSuRgZlE/edit
@@ -12,8 +12,9 @@ https://docs.google.com/spreadsheets/d/1bWFtNl7FlBx4OP0isP9TDj06nJFmVRqvjquFTBIx
 
 ## Runtime behavior
 
-- **20:00 America/Vancouver:** scan `https://8nap.art/collections` once daily. Parse the structured website data and verify contract standards onchain. Preserve existing collection names, metadata, auction settings, and mint/sales cursors.
-- **21:00 America/Vancouver:** reconcile all available monthly mint ledger files against the sheet's existing event IDs. Append missing events only. With no missing events, write no Google cells. Sales after the cutoff are included in the next successful run. Monthly CSVs use UTC months, as before.
+- **23:00 America/Vancouver:** scan `https://8nap.art/collections` once daily. Parse the structured website data and verify contract standards onchain. Preserve existing collection names, metadata, auction settings, and mint/sales cursors.
+- **23:30 America/Vancouver:** reconcile all available monthly mint ledger files against the sheet's existing event IDs. Append missing events only. With no missing events, write no Google cells. Sales after the cutoff are included in the next successful run. Monthly CSVs use UTC months, as before.
+- Both schedules accept an integer `minute` from 0–59, defaulting to 0 for older configurations. The bot checks schedules once per minute and starts each job on the first available tick at or after its scheduled time. The local calendar day still identifies each daily slot; recovery can run later after an interruption.
 - Daily jobs persist an unfinished slot before starting work and clear it after successful completion. A restart recovers interrupted work before the next scheduled hour, including a first-ever attempt with no success or error history. Older first-attempt state is also recovered. Recovery coalesces multiple missed days into the most recent due slot. Failures retain the unfinished slot and retry after 15 minutes, with an admin alert at most every six hours for continued failures. Changed review items produce an alert once and remain visible in `/status`.
 - Vancouver uses permanent UTC−7 after 8 March 2026, including deployments with older ICU timezone data. See the [B.C. announcement](https://news.gov.bc.ca/releases/2026AG0013-000209).
 
@@ -65,6 +66,7 @@ Live-site inspection on 30 September 2026 found 20 visible collections, all curr
 
 ## Verification completed locally
 
+- The timing adjustment passed all 87 tests. Three new cases verify the 23:00/23:30 boundaries, invalid minute settings and compatibility with whole-hour configurations, and 23:30 execution/deduplication/recovery with retry backoff across midnight and restarts. Only schedule handling and the two configured times changed; trial targets and collection safety flags remain as recorded above.
 - 84 automated tests passed, including 24 new regression cases addressing the external review findings. Six cases cover the follow-up review: pending reactivation across mode/settings changes and restarts, an actual process exit during the first daily run followed by morning recovery, older first-attempt state, recovery backoff across restarts, missed-day coalescing, and fresh startup before the scheduled hour. Other coverage includes fast sell-outs, changed and already-retired editions, repeated batch IDs and partial posting retries, blank-displaying formulas, and workbook-specific recovery/schedules. The existing IsoMetro sale-embed regression check passed before these repairs; sale rendering is unchanged.
 - A live write to the validation copy added a synthetic ERC-1155 event of two pieces and 0.04 ETH. The derived event ID populated, the reporting checks remained `Passed`, and totals increased by exactly those amounts within spreadsheet floating-point precision. Re-running the import planner against the actual readback planned zero duplicate rows. Production workbook cells were untouched.
 - Dashboard cell formatting and computed reporting values were checked through the API. A browser-rendered visual check was initially unavailable under the primary Google login; the later check under `0xfnkl@gmail.com` succeeded, as recorded below.

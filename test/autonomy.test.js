@@ -9,7 +9,7 @@ const { execFileSync } = require("node:child_process");
 const { createMintLedger, eventId, parseCsv, readMintRecords } = require("../mint-ledger");
 const { createDailyJob, localSchedule, writeJson, readJson } = require("../daily-jobs");
 const { rawValues, planImport, valuesData, verifyRows, syncMintSheet, SheetsClient, sheetStatePaths, RAW_HEADERS, LOG_HEADERS } = require("../sheets-sync");
-const { createBotAutonomy } = require("../bot-autonomy");
+const { createBotAutonomy, settings } = require("../bot-autonomy");
 
 const A = "0x" + "a".repeat(40), W = "0x" + "b".repeat(40), TX = "0x" + "c".repeat(64);
 const row = (changes = {}) => ({ DateUTC: "2026-09-30T23:00:00.000Z", ProjectKey: A, Collection: 'Collection, "one"', Standard: "erc721", Quantity: "1", MinterWallet: W, ETHPrice: "0.025", TokenID: "1", Contract: A, TxHash: TX, BlockNumber: "25000000", LogIndex: "0", ...changes });
@@ -188,6 +188,46 @@ test("9 PM Vancouver respects B.C.'s permanent UTC−7; historical winter still 
   assert.equal(localSchedule(new Date("2026-12-01T04:00:00Z"), "America/Vancouver", 21).due, true);
   assert.equal(localSchedule(new Date("2026-01-01T04:59:00Z"), "America/Vancouver", 21).due, false);
   assert.equal(localSchedule(new Date("2026-01-01T05:00:00Z"), "America/Vancouver", 21).due, true);
+});
+
+test("11 PM discovery and 11:30 PM imports respect minute and local-day boundaries", () => {
+  assert.deepEqual(localSchedule(new Date("2026-10-01T05:59:59Z"), "America/Vancouver", 23, 0), { day: "2026-09-30", due: false });
+  assert.deepEqual(localSchedule(new Date("2026-10-01T06:00:00Z"), "America/Vancouver", 23, 0), { day: "2026-09-30", due: true });
+  assert.equal(localSchedule(new Date("2026-10-01T06:29:59Z"), "America/Vancouver", 23, 30).due, false);
+  assert.deepEqual(localSchedule(new Date("2026-10-01T06:30:00Z"), "America/Vancouver", 23, 30), { day: "2026-09-30", due: true });
+  assert.deepEqual(localSchedule(new Date("2026-10-01T07:00:00Z"), "America/Vancouver", 23, 30), { day: "2026-10-01", due: false });
+  assert.equal(localSchedule(new Date("2026-12-01T06:29:59Z"), "America/Vancouver", 23, 30).due, false);
+  assert.equal(localSchedule(new Date("2026-12-01T06:30:00Z"), "America/Vancouver", 23, 30).due, true);
+  assert.equal(localSchedule(new Date("2026-01-01T07:29:59Z"), "America/Vancouver", 23, 30).due, false);
+  assert.equal(localSchedule(new Date("2026-01-01T07:30:00Z"), "America/Vancouver", 23, 30).due, true);
+});
+
+test("minute scheduling rejects invalid values and preserves whole-hour configurations", () => {
+  const defaults = { enabled: true, mode: "observe", hour: 23, minute: 0, timeZone: "America/Vancouver" };
+  for (const minute of [-1, 60, 0.5, "30", null]) {
+    assert.throws(() => settings({ minute }, defaults, ["observe"]), /minute/);
+  }
+  assert.equal(settings({}, defaults, ["observe"]).minute, 0);
+  assert.equal(settings({ minute: 30 }, defaults, ["observe"]).minute, 30);
+  assert.equal(localSchedule(new Date("2026-10-01T06:00:00Z"), "America/Vancouver", 23).due, true);
+});
+
+test("11:30 PM job waits for the minute, deduplicates after midnight and recovers interrupted work", async t => {
+  const file = path.join(temp(t), "job.json"); let clock = new Date("2026-10-01T06:29:59Z"), runs = 0;
+  const options = { name: "half-hour", file, timeZone: "America/Vancouver", hour: 23, minute: 30,
+    now: () => clock, run: async () => ({ runs: ++runs }), log() {} };
+  await createDailyJob(options).tick(); assert.equal(runs, 0); assert.equal(fs.existsSync(file), false);
+  clock = new Date("2026-10-01T06:30:00Z");
+  await createDailyJob(options).tick(); await createDailyJob(options).tick(); assert.equal(runs, 1);
+  assert.equal(readJson(file, {}).lastCompletedDay, "2026-09-30");
+  clock = new Date("2026-10-01T07:00:00Z"); await createDailyJob(options).tick(); assert.equal(runs, 1);
+  clock = new Date("2026-10-02T06:29:59Z"); await createDailyJob(options).tick(); assert.equal(runs, 1);
+  clock = new Date("2026-10-02T06:30:00Z"); await createDailyJob(options).tick(); assert.equal(runs, 2);
+  writeJson(file, { lastCompletedDay: "2026-10-01", unfinishedSlot: "2026-10-02", lastAttempt: "2026-10-03T06:30:00.000Z", nextAttempt: Date.parse("2026-10-03T15:15:00Z") });
+  clock = new Date("2026-10-03T15:00:00Z"); await createDailyJob(options).tick(); assert.equal(runs, 2);
+  clock = new Date("2026-10-03T15:15:00Z"); await createDailyJob(options).tick(); await createDailyJob(options).tick();
+  assert.equal(runs, 3); assert.equal(readJson(file, {}).lastCompletedDay, "2026-10-02");
+  assert.equal(readJson(file, {}).unfinishedSlot, null);
 });
 
 test("scheduler runs once per day, survives restart and catches up once before evening", async t => {
