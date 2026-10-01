@@ -145,6 +145,30 @@
         "artist": "Various Artists",
         "standard": "erc1155",
         "contractAddress": "0x6b1479a88695de864940e77477811205a3d52388"
+      },
+      {
+        "name": "Digital Mythology: 1 of 1 Series",
+        "artist": "Various Artists",
+        "standard": "erc1155",
+        "contractAddress": "0xa1979d3fec5aec467094f274550dd5e2f41c1830"
+      },
+      {
+        "name": "This Was Us",
+        "artist": "Andrea Ciulu",
+        "standard": "erc721",
+        "contractAddress": "0x210cfccd9bc218200eddcb49c67064351cc27c33"
+      },
+      {
+        "name": "Luminaries",
+        "artist": "Dario Lanza",
+        "standard": "erc721",
+        "contractAddress": "0x73D9AC8Dd051597788B76606011beF8941AA24e8"
+      },
+      {
+        "name": "When All I Had Was Stars",
+        "artist": "Pho",
+        "standard": "erc1155",
+        "contractAddress": "0x7eF98feA6FB32e612dd4E5ad6af8b56d23468978"
       }
     ]
   },
