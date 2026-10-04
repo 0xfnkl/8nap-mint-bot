@@ -73,7 +73,8 @@ test("verification detects broken formula, changed quantities and changed ETH", 
 });
 
 function fakeClient(spreadsheetId = "test-sheet") {
-  const client = { spreadsheetId, rows: [], logs: [], writes: 0, async layout() { return { logRows: 500 }; },
+  const client = { spreadsheetId, rows: [], logs: [], writes: 0, heartbeats: [], async layout() { return { logRows: 500 }; },
+    async publishHeartbeat(recordsChecked) { const at = new Date().toISOString(); this.heartbeats.push({ recordsChecked, at }); return at; },
     async health() { return []; },
     async inputValues(range) { return this.values(range, "FORMULA"); },
     async values(range, render = "UNFORMATTED_VALUE") {
@@ -105,13 +106,17 @@ test("lost write response recovers from sheet readback without another POST", as
   const result = await syncMintSheet({ client, records: [row()], stateFile, dryRun: false });
   assert.equal(client.writes, 1); assert.equal(result.newEvents, 0); assert.equal(client.rows.length, 1); assert.equal(client.logs.length, 1);
   assert.equal(readJson(stateFile, {}).pending, null);
+  assert.equal(client.heartbeats.length, 1);
 });
 
-test("dry run and an empty day never write spreadsheet cells", async t => {
+test("dry run never writes; an empty apply day advances only the heartbeat", async t => {
   const client = fakeClient(), stateFile = path.join(temp(t), "sync.json");
   const planned = await syncMintSheet({ client, records: [row()], stateFile });
   assert.equal(planned.newEvents, 1); assert.equal(client.writes, 0);
-  await syncMintSheet({ client, records: [], stateFile, dryRun: false }); assert.equal(client.writes, 0);
+  assert.equal(client.heartbeats.length, 0);
+  const empty = await syncMintSheet({ client, records: [], stateFile, dryRun: false }); assert.equal(client.writes, 0);
+  assert.equal(client.heartbeats.length, 1); assert.equal(client.heartbeats[0].recordsChecked, 0);
+  assert.equal(empty.lastDataSync, client.heartbeats[0].at);
 });
 
 test("successful writes verify numbers and avoid duplicates on a repeated run", async t => {
@@ -129,7 +134,39 @@ test("imports larger than 500 events complete in bounded verified batches", asyn
   assert.equal(result.newEvents, 1001); assert.equal(client.writes, 3);
   assert.equal(client.rows.length, 1001); assert.equal(client.logs.length, 3);
   assert.equal(client.logs[0][6], "2026-09-30");
+  assert.equal(client.heartbeats.length, 1); assert.equal(client.heartbeats[0].recordsChecked, 1001);
   await syncMintSheet({ client, records, stateFile, dryRun: false }); assert.equal(client.writes, 3);
+});
+
+test("failed imports and unresolved checks do not publish a success heartbeat", async t => {
+  const client = fakeClient(), stateFile = path.join(temp(t), "sync.json");
+  client.loseResponse = true;
+  await assert.rejects(syncMintSheet({ client, records: [row()], stateFile, dryRun: false }), /response lost/);
+  assert.equal(client.heartbeats.length, 0);
+  client.health = async () => ["Unassigned phase pieces: 1"];
+  const result = await syncMintSheet({ client, records: [row()], stateFile, dryRun: false });
+  assert.deepEqual(result.needsReview, ["Unassigned phase pieces: 1"]);
+  assert.equal(result.lastDataSync, null); assert.equal(client.heartbeats.length, 0);
+  client.health = async () => { throw new Error("checks unavailable"); };
+  await assert.rejects(syncMintSheet({ client, records: [row()], stateFile, dryRun: false }), /checks unavailable/);
+  assert.equal(client.heartbeats.length, 0);
+});
+
+test("heartbeat failure retries safely after completed imports without appending duplicates", async t => {
+  const client = fakeClient(), stateFile = path.join(temp(t), "sync.json"), publish = client.publishHeartbeat;
+  client.publishHeartbeat = async () => { throw new Error("heartbeat response lost"); };
+  await assert.rejects(syncMintSheet({ client, records: [row()], stateFile, dryRun: false }), /heartbeat response lost/);
+  assert.equal(client.rows.length, 1); assert.equal(readJson(stateFile, {}).pending, null);
+  client.publishHeartbeat = publish;
+  const result = await syncMintSheet({ client, records: [row()], stateFile, dryRun: false });
+  assert.equal(result.newEvents, 0); assert.equal(client.logs.length, 1); assert.equal(client.writes, 1);
+  assert.equal(client.heartbeats.length, 1);
+});
+
+test("a partial import exceeding the batch budget never advances freshness", async t => {
+  const client = fakeClient(), records = Array.from({ length: 3001 }, (_, i) => row({ TokenID: String(i + 1) }));
+  await assert.rejects(syncMintSheet({ client, records, stateFile: path.join(temp(t), "sync.json"), dryRun: false }), /batch budget/);
+  assert.equal(client.rows.length, 3000); assert.equal(client.heartbeats.length, 0);
 });
 
 test("an unsuccessful sheet write re-plans empty reserved rows before retry", async t => {

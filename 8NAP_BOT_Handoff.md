@@ -13,6 +13,8 @@ This is designed to be robust and restart-safe via persisted state on `/data`.
 
 ## Daily automation implementation — 30 September 2026
 
+October 1 local change, pending release: the importer also owns a small `Sync Status!A1:D2` heartbeat. It advances only after all applied batches and reporting checks pass, including zero-event days, so the website can distinguish data-sync freshness from its own refresh time. See the rollout guide's daily freshness section for schema, retry behavior and release verification. Monthly CSV generation remains unchanged.
+
 Daily collection discovery at 23:00 in observation mode and mint sheet reconciliation at 23:30 against the validation copy are enabled in America/Vancouver. Production sheet writes and automatic collection changes await the later rollout stages. The scheduler accepts minute-level timing while preserving daily deduplication and recovery. Read [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md) for exact rollout steps and verified workbook IDs.
 
 Daily jobs persist an unfinished slot before running, so an interrupted first attempt recovers on a morning restart. Failures preserve that marker and retry backoff; success clears it. Missed days coalesce to the latest due slot. Collection reactivations remain pending through observation mode or disabled automatic retirement and clear only when applied, preserving catch-up across restarts.

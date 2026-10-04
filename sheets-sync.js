@@ -8,6 +8,7 @@ const { readJson, writeJson } = require("./daily-jobs");
 const RAW_HEADERS = ["Date UTC", "Mint project key", "Collection", "Standard", "Pieces", "Recipient wallet", "ETH per row", "Token ID", "Contract", "Transaction hash", "Block number", "Log index", "Source", "Mint event ID", "Receipt check", "Source history", "Source note"];
 const LOG_HEADERS = ["Source", "Records read", "New events", "Overlapping events", "Price differences", "Source URL", "Loaded on", "Notes"];
 const CHECK_NAMES = ["Receipt conflicts", "Unmapped events", "Unassigned phase pieces", "Project warnings", "Adjustment checks", "Wallet checks", "Duplicate phase rules"];
+const SYNC_HEADERS = ["Source", "Spreadsheet ID", "Last successful sync UTC", "Records checked"];
 const quote = title => `'${title.replace(/'/g, "''")}'`;
 
 function validateSpreadsheetId(spreadsheetId) {
@@ -154,6 +155,32 @@ class SheetsClient {
     if (checks.length !== 8 || checks.slice(0, 7).some((row, i) => row[0] !== CHECK_NAMES[i] || !Number.isSafeInteger(row[1]) || row[1] < 0) || checks[7][0] !== "Import checks" || !["Passed", "Needs review"].includes(checks[7][1])) throw new Error("Reporting Checks format changed or contains formula errors; review the workbook");
     return checks.slice(0, 7).filter(row => row[1] > 0).map(row => `${row[0]}: ${row[1]}`);
   }
+
+  async publishHeartbeat(recordsChecked, completedAt = new Date().toISOString()) {
+    if (!Number.isSafeInteger(recordsChecked) || recordsChecked < 0 || !Number.isFinite(Date.parse(completedAt)) || new Date(completedAt).toISOString() !== completedAt) throw new Error("Invalid sync heartbeat");
+    const record = ["8nap-mint-bot", this.spreadsheetId, completedAt, recordsChecked];
+    const metadata = await this.request("?fields=sheets.properties");
+    if (!Array.isArray(metadata.sheets)) throw new Error("Missing sheet metadata for sync heartbeat");
+    const sheet = metadata.sheets.find(s => s.properties?.title === "Sync Status");
+    if (!sheet) {
+      const ids = new Set(metadata.sheets.map(s => s.properties.sheetId));
+      let sheetId = 900100;
+      while (ids.has(sheetId)) sheetId++;
+      // Create the tab and its owned cells atomically. A lost response is safe:
+      // the next scheduled retry discovers and validates the existing tab.
+      await this.request(":batchUpdate", { requests: [
+        { addSheet: { properties: { sheetId, title: "Sync Status", gridProperties: { rowCount: 2, columnCount: 4, frozenRowCount: 1 } } } },
+        { updateCells: { start: { sheetId, rowIndex: 0, columnIndex: 0 }, rows: [SYNC_HEADERS, record].map(values => ({ values: values.map(value => ({ userEnteredValue: typeof value === "number" ? { numberValue: value } : { stringValue: value } })) })), fields: "userEnteredValue" } },
+      ] });
+    } else {
+      const existing = await this.inputValues("'Sync Status'!A1:D2");
+      if (JSON.stringify(existing[0]) !== JSON.stringify(SYNC_HEADERS) || existing[1]?.[0] !== record[0] || existing[1]?.[1] !== this.spreadsheetId || existing[1]?.some(value => typeof value === "string" && value.startsWith("="))) throw new Error("Sync Status ownership or schema changed; heartbeat preserved");
+      await this.write([{ range: "'Sync Status'!A2:D2", values: [record] }]);
+    }
+    const actual = await this.values("'Sync Status'!A1:D2");
+    if (JSON.stringify(actual) !== JSON.stringify([SYNC_HEADERS, record])) throw new Error("Sync heartbeat verification failed");
+    return completedAt;
+  }
 }
 
 async function syncBatch({ client, records, stateFile, maxRows = 12000, dryRun = true, now = new Date() }) {
@@ -206,14 +233,21 @@ async function syncBatch({ client, records, stateFile, maxRows = 12000, dryRun =
 
 async function syncMintSheet(options) {
   let total = 0, firstRow;
-  // Six batches stay below the standard 60 reads/minute service-account quota.
+  // Bound large imports; heartbeat reads occur only after the final batch.
   for (let batch = 0; batch < 6; batch++) {
     const result = await syncBatch(options);
     firstRow ??= result.startRow;
     total += result.newEvents;
-    if (!result.more) return { ...result, newEvents: total, startRow: firstRow, needsReview: await options.client.health() };
+    if (!result.more) {
+      const needsReview = await options.client.health();
+      // A quiet day is still a successful reconciliation. Dry runs, incomplete
+      // batches, failed writes and unresolved checks must not advance freshness.
+      const lastDataSync = result.mode === "apply" && !needsReview.length
+        ? await options.client.publishHeartbeat(result.recordsRead) : null;
+      return { ...result, newEvents: total, startRow: firstRow, needsReview, lastDataSync };
+    }
   }
   throw new Error("Sheet import exceeded its per-run batch budget; completed batches are preserved and the next run will reconcile them");
 }
 
-module.exports = { RAW_HEADERS, LOG_HEADERS, rawValues, planImport, valuesData, verifyRows, SheetsClient, sheetStatePaths, syncMintSheet };
+module.exports = { RAW_HEADERS, LOG_HEADERS, SYNC_HEADERS, rawValues, planImport, valuesData, verifyRows, SheetsClient, sheetStatePaths, syncMintSheet };
