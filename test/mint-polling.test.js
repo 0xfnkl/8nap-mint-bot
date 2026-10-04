@@ -8,6 +8,7 @@ const path = require("path");
 const vm = require("vm");
 const { createRequire } = require("module");
 const { ethers } = require("ethers");
+const { createCollectionRegistry, parseCatalog, supplySignature } = require("../collection-discovery");
 
 const A = "0x" + "a".repeat(40), W = "0x" + "b".repeat(40), TX = "0x" + "c".repeat(64);
 const collection = { name: "Test editions", artist: "Test", standard: "erc1155", contractAddress: A };
@@ -33,7 +34,7 @@ function bot(t) {
     client.channels.fetch = async () => ({});
     rateLimiter.send = async () => {};
     globalThis.bot = {
-      pollOnce, postMint, loadState, saveState, ledger: mintLedger, provider, client,
+      pollOnce, postMint, loadState, saveState, initializeStateToHeadIfEmpty, ledger: mintLedger, provider, client,
       setCollections(collections, batches = 1) {
         automation = { mintCollections: () => collections, catchupBatches: () => batches };
       },
@@ -41,6 +42,7 @@ function bot(t) {
     };
   `, context, { filename: indexPath });
   const result = context.bot;
+  result.stateDir = dir;
   result.provider.getBlockNumber = async () => 102;
   result.provider.getBlock = async () => ({ timestamp: Date.parse("2026-09-30T23:00:00Z") / 1000 });
   result.provider.getTransaction = async () => ({ value: ethers.parseEther("0.05") });
@@ -53,6 +55,63 @@ function batchLog(ids = [1, 2], quantities = [3, 2]) {
   const encoded = batchInterface.encodeEventLog(batchInterface.getEvent("TransferBatch"), [W, ethers.ZeroAddress, W, ids, quantities]);
   return { ...encoded, transactionHash: TX, blockNumber: 100, index: 0 };
 }
+
+for (const existingCursor of [0, 20]) {
+  test(`reviewed ERC1155 reopening catches intervening mints without old history from cursor ${existingCursor}`, async t => {
+    const runtime = bot(t), windows = [];
+    runtime.saveState(A, { lastProcessedBlock: existingCursor, processed: {} });
+    const original = { project_address: A, project_identifier: "editions", project_type: 3, is_visible: 1, is_minting: 0, name: "Test editions", full_name: "Test", total_supply: 0, max_supply: null, supply_left_for_auction: 0,
+      sub_projects: [{ token_id: 0, total_supply: 10, max_supply: 10, is_visible: 1 }] };
+    let catalog = original;
+    const page = p => `<a href="/editions/editions">card</a><script>self.__next_f.push(${JSON.stringify([1, `0:${JSON.stringify({ projects: [p] })}\n`])})</script>`;
+    const options = { enabled: true, mode: "apply", autoAdd: true, autoRetire: true, maxAdditionsPerScan: 5, maxMintCatchupBlocks: 1,
+      reviewedClosedCollections: [{ contractAddress: A, supplySignature: supplySignature(parseCatalog(page(original))[0]), auctionSupply: 0, resumeAfterBlock: 80 }] };
+    const args = { file: path.join(runtime.stateDir, "registry.json"), options, mintCollections: [], salesCollections: [collection], provider: runtime.provider, confirmations: 2,
+      loadMintState: runtime.loadState, initializeMint: runtime.initializeStateToHeadIfEmpty, initializeSales: () => assert.fail("Sales coverage must stay intact"),
+      fetchImpl: async () => ({ ok: true, text: async () => page(catalog) }), validate: async () => {}, soldOut: async () => true,
+      findDeployment: () => assert.fail("Must not replay deployment history") };
+    let registry = createCollectionRegistry(args);
+    await registry.scan(new Date("2026-10-04T06:00:00Z"));
+    catalog = { ...original, sub_projects: [...original.sub_projects, { token_id: 1, total_supply: 2, max_supply: 2, is_visible: 1 }, { token_id: 2, total_supply: 3, max_supply: 3, is_visible: 1 }] };
+    const result = await registry.scan(new Date("2026-10-05T06:00:00Z"));
+    assert.deepEqual(result.reactivateMint, ["Test editions"]);
+    const logs = [
+      { ...batchLog([0], [10]), blockNumber: 70, transactionHash: "0x" + "1".repeat(64) },
+      { ...batchLog([1], [2]), blockNumber: 90, transactionHash: "0x" + "2".repeat(64) },
+      { ...batchLog([2], [3]), blockNumber: 100, transactionHash: "0x" + "3".repeat(64) },
+    ];
+    runtime.provider.getLogs = async ({ fromBlock, toBlock }) => { windows.push([fromBlock, toBlock]); return logs.filter(l => l.blockNumber >= fromBlock && l.blockNumber <= toBlock); };
+    runtime.setCollections(registry.mintCollections(), 3);
+    await runtime.pollOnce();
+    assert.deepEqual(windows, [[81, 85], [86, 90], [91, 95]]);
+    assert.equal(runtime.loadState(A).lastProcessedBlock, 95);
+    assert.deepEqual(runtime.ledger.read().map(r => r.TokenID), ["1"]);
+    registry = createCollectionRegistry(args); runtime.setCollections(registry.mintCollections(), 3);
+    let sends = 0; runtime.setSender(async () => { if (++sends === 1) throw new Error("Discord response lost"); });
+    await runtime.pollOnce(); assert.equal(runtime.loadState(A).lastProcessedBlock, 99);
+    await runtime.pollOnce(); await runtime.pollOnce();
+    assert.equal(runtime.loadState(A).lastProcessedBlock, 100);
+    assert.deepEqual(runtime.ledger.read().map(r => [r.TokenID, r.Quantity]), [["1", "2"], ["2", "3"]]);
+    // Catch-up finishes before ordinary two-observation retirement; a later edition
+    // still resumes from this saved cursor rather than reusing the legacy checkpoint.
+    await registry.scan(new Date("2026-10-06T06:00:00Z"));
+    await registry.scan(new Date("2026-10-07T06:00:00Z"));
+    assert.deepEqual(registry.mintCollections(), []); assert.equal(registry.salesCollections().length, 1);
+    catalog = { ...catalog, sub_projects: [...catalog.sub_projects, { token_id: 3, total_supply: 1, max_supply: 1, is_visible: 1 }] };
+    await registry.scan(new Date("2026-10-08T06:00:00Z"));
+    assert.equal(registry.mintCollections().length, 1); assert.equal(runtime.loadState(A).lastProcessedBlock, 100);
+    assert.equal(runtime.ledger.read().length, 2);
+  });
+}
+
+test("a reviewed resumption floor never rewinds newer mint progress", async t => {
+  const runtime = bot(t), windows = [];
+  runtime.saveState(A, { lastProcessedBlock: 95, processed: {} });
+  runtime.setCollections([{ ...collection, startBlock: 81, discoveryCatchup: true }], 3);
+  runtime.provider.getLogs = async range => { windows.push([range.fromBlock, range.toBlock]); return []; };
+  await runtime.initializeStateToHeadIfEmpty({ ...collection, startBlock: 81, discoveryCatchup: true });
+  await runtime.pollOnce(); assert.deepEqual(windows, [[96, 100]]);
+});
 
 test("real poller decodes ERC1155 batches and retries a Discord failure without duplicate ledger rows", async t => {
   const runtime = bot(t); let sends = 0;

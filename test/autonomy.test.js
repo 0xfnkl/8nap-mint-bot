@@ -360,6 +360,35 @@ test("review items alert on change and remain visible without repeating daily al
   review = ["New collection needs auction setup"]; clock = new Date("2026-10-04T04:00:00Z"); await job.tick(); assert.equal(alerts, 2);
 });
 
+test("invalid closed reviews preserve applied sales coverage through bot startup and pause discovery", async t => {
+  const manual = { name: "Reviewed legacy", standard: "erc721", contractAddress: A };
+  const discovered = { name: "Previously discovered", standard: "erc721", contractAddress: W };
+  const review = { contractAddress: A, supplySignature: JSON.stringify(["erc721", 10, 10, []]), auctionSupply: 0 };
+  for (const settings of [{ enabled: true, mode: "apply" }, { enabled: true, mode: "observe" }, { enabled: false, mode: "apply" }]) {
+    for (const issue of ["malformed", "duplicate", "missing auction snapshot", "manual mint overlap"]) {
+      const stateDir = temp(t), file = path.join(stateDir, "collection_registry.json");
+      writeJson(file, { version: 1, entries: { [W]: { collection: discovered, salesAdded: true, mintAdded: true, mintStartBlock: 95 } }, observed: [W], lastScanBlock: 100 });
+      const before = fs.readFileSync(file, "utf8"), alerts = [];
+      const mintCollections = issue === "manual mint overlap" ? [manual] : [];
+      const reviewedClosedCollections = issue === "malformed" ? [{}] : issue === "duplicate" ? [review, review] : issue === "missing auction snapshot" ? [{ ...review, auctionSupply: undefined }] : [review];
+      const forbidden = () => { assert.fail("Paused discovery must not fetch, initialize, or read the ledger"); };
+      const args = { config: { collectionDiscovery: { ...settings, autoAdd: true, autoRetire: true, reviewedClosedCollections }, sales: { collections: [manual] } }, stateDir, mintCollections,
+        ledger: { read: forbidden }, provider: { getBlockNumber: forbidden }, loadMintState: forbidden, initializeMint: forbidden, initializeSales: forbidden, alert: async message => alerts.push(message), log() {} };
+      for (let restart = 0; restart < 2; restart++) {
+        const automation = createBotAutonomy(args);
+        assert.match(automation.status().join("\n"), /Collection discovery paused: Invalid reviewed closed/);
+        assert.deepEqual(automation.salesCollections(), [manual, discovered]);
+        const expectedMint = settings.enabled && settings.mode === "apply" ? [...mintCollections, { ...discovered, startBlock: 95, discoveryCatchup: true }] : mintCollections;
+        assert.deepEqual(automation.mintCollections(), expectedMint);
+        await automation.tick(); await automation.tick();
+        assert.equal(alerts.length, restart + 1);
+        assert.equal(fs.readFileSync(file, "utf8"), before);
+        assert.equal(fs.existsSync(path.join(stateDir, "discovery_job.json")), false);
+      }
+    }
+  }
+});
+
 test("invalid automation config preserves manual tracking and reports the configuration error", async t => {
   const mint = { name: "Test", contractAddress: A, standard: "erc721" };
   const automation = createBotAutonomy({ config: { collections: [mint], sales: { collections: [mint] }, sheetSync: { enabled: true, mode: "invalid" } }, stateDir: temp(t), mintCollections: [mint], ledger: { read() { throw new Error("Must not read ledger"); } }, alert: async () => {}, log() {} });

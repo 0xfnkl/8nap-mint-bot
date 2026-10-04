@@ -23,7 +23,8 @@ function createBotAutonomy({ config, stateDir, ledger, provider, confirmations, 
   try {
     discoveryOptions = settings(config.collectionDiscovery, { enabled: false, mode: "observe", autoAdd: false, autoRetire: false, timeZone: "America/Vancouver", hour: 20, minute: 0, maxAdditionsPerScan: 5, maxMintCatchupBlocks: 10000, mintCatchupBatchesPerPoll: 10 }, ["observe", "apply"]);
     registry = createCollectionRegistry({ file: registryFile, options: discoveryOptions, mintCollections, salesCollections: config.sales?.collections || [], loadMintState, provider, confirmations, initializeMint, initializeSales });
-    if (discoveryOptions.enabled) jobs.push(createDailyJob({ name: "collection discovery", file: path.join(stateDir, "discovery_job.json"), timeZone: discoveryOptions.timeZone, hour: discoveryOptions.hour, minute: discoveryOptions.minute, alert, log, run: date => registry.scan(date) }));
+    if (registry.configurationError) errors.push(`Collection discovery paused: ${registry.configurationError}`);
+    else if (discoveryOptions.enabled) jobs.push(createDailyJob({ name: "collection discovery", file: path.join(stateDir, "discovery_job.json"), timeZone: discoveryOptions.timeZone, hour: discoveryOptions.hour, minute: discoveryOptions.minute, alert, log, run: date => registry.scan(date) }));
   } catch (e) { errors.push(`Collection discovery disabled: ${e.message}`); registry = null; }
   try {
     const options = settings(config.sheetSync, { enabled: false, mode: "dry-run", timeZone: "America/Vancouver", hour: 21, minute: 0, maxRows: 12000 }, ["dry-run", "apply"]);

@@ -3415,14 +3415,17 @@ async function pollOnce() {
   for (const collection of mintCollectionsConfig()) {
     if (!collection.contractAddress || !collection.standard) continue;
 
-    // Extra bounded windows are only for newly discovered collections catching up from deployment.
+    // Extra bounded windows catch up discovered and resumed collections without unbounded polls.
     for (let batch = 0; batch < (automation?.catchupBatches(collection) || 1); batch++) {
 
     const addr = collection.contractAddress;
     const standard = collection.standard.toLowerCase();
     console.log(`[pollOnce] collection=${collection.name} addr=${addr}`);
     const st = loadState(addr);
-    const fromBlock = st.lastProcessedBlock + 1;
+    // A reviewed legacy collection can retain an older cursor. Its explicit start
+    // excludes acknowledged history while preserving progress beyond that boundary.
+    const fromBlock = Math.max(st.lastProcessedBlock + 1,
+      collection.discoveryCatchup && Number.isSafeInteger(collection.startBlock) ? collection.startBlock : 0);
     if (fromBlock > safeHead) break;
 
     const toBlock = Math.min(fromBlock + MAX_BLOCK_RANGE - 1, safeHead);

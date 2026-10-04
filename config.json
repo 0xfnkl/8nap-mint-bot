@@ -20,7 +20,82 @@
     "minute": 0,
     "maxAdditionsPerScan": 5,
     "maxMintCatchupBlocks": 10000,
-    "mintCatchupBatchesPerPoll": 10
+    "mintCatchupBatchesPerPoll": 10,
+    "reviewedClosedCollections": [
+      {
+        "name": "What Cities Hold",
+        "contractAddress": "0xe0b3df70993aa148ea47f3f028bf76c88acb2671",
+        "supplySignature": "[\"erc721\",350,350,[]]",
+        "auctionSupply": 0
+      },
+      {
+        "name": "Where The West Stands Still",
+        "contractAddress": "0x7bcde03d10038a712adc1f254189ce470b36d4ba",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",20,20],[\"1\",1,1],[\"2\",1,1],[\"3\",1,1],[\"4\",1,1],[\"5\",1,1]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "8NAP Masters Series",
+        "contractAddress": "0x10abb881add1de70d4a9b2c712b9a8ac8853418b",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",1,1],[\"1\",1,1],[\"2\",1,1],[\"3\",1,1],[\"4\",1,1]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "The Weight of Almost",
+        "contractAddress": "0xcd7c00cc8dd5dd4a0dae48ccd692edbd6223e375",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",50,50],[\"1\",10,10],[\"2\",10,10],[\"3\",10,10],[\"4\",10,10],[\"5\",10,10],[\"6\",50,50]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "The Red Series",
+        "contractAddress": "0x4166924fefdef6d1df9769118cf0cd5a1fde41b7",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",88,88],[\"1\",50,50],[\"2\",50,50]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "Export Control",
+        "contractAddress": "0x86427bce68b3927192ef7f06fee1b6773ba41ba9",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",99,99],[\"1\",64,64],[\"2\",48,48],[\"3\",32,32],[\"4\",24,24],[\"5\",16,16],[\"6\",8,8]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "Old Tech in the West",
+        "contractAddress": "0x46adfadad1434745617c4bc2592a28a2e634602d",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",25,25],[\"1\",25,25],[\"2\",20,20]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "Echoes",
+        "contractAddress": "0x62e58fe8285733cd5b0853158c2d2a054b45de4f",
+        "supplySignature": "[\"erc721\",350,350,[]]",
+        "auctionSupply": 20
+      },
+      {
+        "name": "pREDa",
+        "contractAddress": "0x28a6307f305b276eaf7099c6996264b11d00fa66",
+        "supplySignature": "[\"erc1155\",0,null,[[\"0\",25,25]]]",
+        "auctionSupply": 0,
+        "resumeAfterBlock": 26120661
+      },
+      {
+        "name": "Issues",
+        "contractAddress": "0xbe27770b0263133b9d3a1d4c7c2760007b94e37f",
+        "supplySignature": "[\"erc721\",500,500,[]]",
+        "auctionSupply": 90
+      },
+      {
+        "name": "IsoMetro",
+        "contractAddress": "0xc43234a9892bc44efad5b2da8f36bc851aac06d3",
+        "supplySignature": "[\"erc721\",365,365,[]]",
+        "auctionSupply": 25
+      }
+    ]
   },
   "mediaPosterBaseUrl": "https://raw.githubusercontent.com/0xfnkl/8nap-mint-bot/main/media-posters",
   "mediaPosters": {

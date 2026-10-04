@@ -26,11 +26,14 @@ function parseCatalog(html) {
         if (!Number.isSafeInteger(e.token_id) || e.token_id < 0 || !Number.isSafeInteger(e.total_supply) || e.total_supply < 0 || !Number.isSafeInteger(e.max_supply) || e.max_supply < 1 || e.total_supply > e.max_supply) throw new Error("Collections page contains invalid edition supply");
         return { tokenId: String(e.token_id), total: e.total_supply, max: e.max_supply };
       });
+      if (new Set(editions.map(e => e.tokenId)).size !== editions.length) throw new Error("Collections page contains duplicate edition IDs");
       let total = value.total_supply, max = value.max_supply;
       if (standard === "erc721" && (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(max) || max < 1 || total > max)) throw new Error("Collections page contains invalid collection supply");
       const soldOut = standard === "erc1155" ? editions.length > 0 && editions.every(e => e.total === e.max) : total === max;
       if (value.is_minting === 0 && !soldOut) throw new Error(`Minting status and supply disagree for ${value.name}`);
-      const project = { address, name: value.name.trim(), artist: String(value.full_name || "Unknown").trim(), standard, minting: value.is_minting === 1, soldOut, total, max, editions, projectId: value.project_id, slug: value.project_identifier, hasAuctions: Number(value.supply_left_for_auction || 0) > 0 };
+      const auctionSupply = value.supply_left_for_auction ?? 0;
+      if (!Number.isSafeInteger(auctionSupply) || auctionSupply < 0) throw new Error("Collections page contains invalid auction supply");
+      const project = { address, name: value.name.trim(), artist: String(value.full_name || "Unknown").trim(), standard, minting: value.is_minting === 1, soldOut, total, max, editions, projectId: value.project_id, slug: value.project_identifier, auctionSupply, hasAuctions: auctionSupply > 0 };
       const prior = projects.get(address);
       if (prior && JSON.stringify(prior) !== JSON.stringify(project)) throw new Error("Collections page has conflicting contract entries");
       projects.set(address, project);
@@ -85,10 +88,24 @@ async function chainRead(label, operation) {
   catch { throw new Error(`Ethereum ${label} read failed; check RPC access and contract support`); }
 }
 
-async function confirmSoldOut(provider, project, blockTag) {
+async function confirmSoldOut(provider, project, blockTag, exact = false) {
   const contract = new ethers.Contract(project.address, ["function totalSupply() view returns (uint256)", "function totalSupply(uint256) view returns (uint256)"], provider);
-  if (project.standard === "erc721") return await chainRead("supply", () => contract["totalSupply()"]({ blockTag })) >= BigInt(project.max);
-  for (const e of project.editions) if (await chainRead("edition supply", () => contract["totalSupply(uint256)"](e.tokenId, { blockTag })) < BigInt(e.max)) return false;
+  const matches = (actual, expected) => exact ? actual === BigInt(expected) : actual >= BigInt(expected);
+  if (project.standard === "erc721") return matches(await chainRead("supply", () => contract["totalSupply()"]({ blockTag })), project.max);
+  // 8NAP's Masters contract reverts for IDs not yet created at the historical
+  // checkpoint. Only its exact absence response can stand in for zero supply,
+  // and only when checking a newly listed ID's expected historical zero.
+  const absentEdition = "0x08c379a0" + ethers.AbiCoder.defaultAbiCoder().encode(["string"], ["Token does not exist"]).slice(2);
+  for (const e of project.editions) {
+    const actual = await chainRead("edition supply", async () => {
+      try { return await contract["totalSupply(uint256)"](e.tokenId, { blockTag }); }
+      catch (error) {
+        if (exact && e.max === 0 && error.code === "CALL_EXCEPTION" && error.data === absentEdition) return 0n;
+        throw error;
+      }
+    });
+    if (!matches(actual, e.max)) return false;
+  }
   return project.editions.length > 0;
 }
 
@@ -113,13 +130,53 @@ function supplySignature(project) {
   return JSON.stringify([project.standard, project.total ?? null, project.max ?? null, editions]);
 }
 
+function reviewedEditions(signature) {
+  if (!Array.isArray(signature) || signature[0] !== "erc1155" || !Array.isArray(signature[3]) || !signature[3].length) return null;
+  const editions = new Map();
+  for (const row of signature[3]) {
+    if (!Array.isArray(row) || row.length !== 3) return null;
+    const [id, total, max] = row;
+    if (typeof id !== "string" || !Number.isSafeInteger(Number(id)) || Number(id) < 0 || String(Number(id)) !== id || editions.has(id) || !Number.isSafeInteger(total) || total < 1 || total !== max) return null;
+    editions.set(id, { total, max });
+  }
+  return editions;
+}
+
 function createCollectionRegistry({ file, options, mintCollections, salesCollections, loadMintState, provider, confirmations, initializeMint, initializeSales, fetchImpl, validate = validateStandard, soldOut = confirmSoldOut, findDeployment = deploymentBlock }) {
+  function readClosedReviews() {
+    const reviews = options.reviewedClosedCollections === undefined ? [] : options.reviewedClosedCollections;
+    if (!Array.isArray(reviews)) throw new Error("Invalid reviewed closed collections");
+    const reviewedClosed = new Map();
+    for (const review of reviews) {
+      const address = typeof review?.contractAddress === "string" ? review.contractAddress.toLowerCase() : "";
+      const sales = salesCollections.find(c => c.contractAddress.toLowerCase() === address);
+      let signature;
+      try { signature = JSON.parse(review.supplySignature); } catch { /* Rejected below. */ }
+      if (!ethers.isAddress(address) || address === ethers.ZeroAddress || reviewedClosed.has(address) ||
+          !sales || mintCollections.some(c => c.contractAddress.toLowerCase() === address) ||
+          !Array.isArray(signature) || signature.length !== 4 || signature[0] !== sales.standard.toLowerCase() ||
+          !Array.isArray(signature[3]) || JSON.stringify(signature) !== review.supplySignature ||
+          !Number.isSafeInteger(review.auctionSupply) || review.auctionSupply < 0) {
+        throw new Error("Invalid reviewed closed collection; require an exact supply snapshot and existing sales-only configuration");
+      }
+      const editions = reviewedEditions(signature);
+      if (review.resumeAfterBlock !== undefined && (!editions || review.auctionSupply !== 0 || !Number.isSafeInteger(review.resumeAfterBlock) || review.resumeAfterBlock < 1 || review.resumeAfterBlock >= Number.MAX_SAFE_INTEGER)) {
+        throw new Error("Invalid reviewed closed collection resumption checkpoint");
+      }
+      reviewedClosed.set(address, { supplySignature: review.supplySignature, auctionSupply: review.auctionSupply, resumeAfterBlock: review.resumeAfterBlock, editions });
+    }
+    return reviewedClosed;
+  }
+  // Review configuration gates new discovery work, not access to already applied tracking.
+  let reviewedClosed, configurationError = null;
+  try { reviewedClosed = readClosedReviews(); }
+  catch (e) { configurationError = e.message; reviewedClosed = new Map(); }
   function state() {
     const value = readJson(file, { version: 1, entries: {}, observed: [], lastScanBlock: null });
     if (value.version !== 1 || !value.entries || typeof value.entries !== "object" || Array.isArray(value.entries) || !Array.isArray(value.observed) || value.observed.some(address => !/^0x[0-9a-f]{40}$/.test(address))) throw new Error("Invalid collection registry state");
     for (const [address, entry] of Object.entries(value.entries)) {
       if (!/^0x[0-9a-f]{40}$/.test(address) || !entry || entry.collection?.contractAddress?.toLowerCase() !== address || !["erc721", "erc1155"].includes(String(entry.collection.standard).toLowerCase()) || !entry.collection.name) throw new Error("Invalid collection registry entry");
-      for (const field of ["mintAdded", "salesAdded", "retired", "reactivated", "pendingReactivation", "mintPaused"]) if (entry[field] !== undefined && typeof entry[field] !== "boolean") throw new Error("Invalid collection registry flags");
+      for (const field of ["mintAdded", "salesAdded", "retired", "reactivated", "pendingReactivation", "mintPaused", "reviewedReopenSeen", "reviewedAuctionSeen"]) if (entry[field] !== undefined && typeof entry[field] !== "boolean") throw new Error("Invalid collection registry flags");
       if (entry.mintAdded && (!Number.isSafeInteger(entry.mintStartBlock) || entry.mintStartBlock < 0)) throw new Error("Invalid discovered mint start block");
       if (entry.supplySignature !== undefined && typeof entry.supplySignature !== "string") throw new Error("Invalid collection supply signature");
     }
@@ -128,7 +185,8 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
   let cached = state();
   function effective(kind) {
     const base = kind === "mint" ? mintCollections : salesCollections;
-    if (!options.enabled || options.mode !== "apply") return [...base];
+    // Turning discovery off freezes new changes; it must not drop applied sales coverage.
+    if (kind === "mint" && (!options.enabled || options.mode !== "apply")) return [...base];
     const current = cached;
     const map = new Map(base.map(c => [c.contractAddress.toLowerCase(), c]));
     for (const [address, entry] of Object.entries(current.entries)) {
@@ -139,12 +197,35 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
     }
     return [...map.values()];
   }
+  function rememberReviewedChanges(catalog, previous) {
+    let changed = false;
+    for (const p of catalog) {
+      const review = reviewedClosed.get(p.address), old = previous.entries[p.address] || {};
+      if (!review || old.mintAdded) continue;
+      if (!p.minting && p.soldOut && review.supplySignature === supplySignature(p) && review.auctionSupply === p.auctionSupply) continue;
+      const collection = salesCollections.find(c => c.contractAddress.toLowerCase() === p.address);
+      const auctionSeen = old.reviewedAuctionSeen || p.hasAuctions || collection.isAuction === true;
+      if (old.reviewedReopenSeen && Boolean(old.reviewedAuctionSeen) === Boolean(auctionSeen)) continue;
+      previous.entries[p.address] = { ...old, collection: old.collection || collection, reviewedReopenSeen: true, reviewedAuctionSeen: Boolean(auctionSeen) };
+      changed = true;
+    }
+    if (changed) {
+      // Safety observations survive later RPC, catalog-completeness, budget, or
+      // initialization failures. No monitoring flags, cursors or successful-scan
+      // metadata are applied by this independent write.
+      writeJson(file, previous);
+      cached = structuredClone(previous);
+    }
+  }
   return {
+    configurationError,
     mintCollections: () => effective("mint"),
     salesCollections: () => effective("sales"),
     status: state,
     async scan(now = new Date()) {
+      if (configurationError) throw new Error(configurationError);
       const catalog = await fetchCatalog(fetchImpl), previous = state();
+      rememberReviewedChanges(catalog, previous);
       if (!previous.entries || !Array.isArray(previous.observed)) throw new Error("Invalid collection registry state");
       const addresses = new Set(catalog.map(p => p.address));
       if (previous.observed.some(address => !addresses.has(address))) throw new Error("Collection scan is incomplete or collections were delisted; existing tracking preserved");
@@ -156,7 +237,7 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
       if (missingSales.length > options.maxAdditionsPerScan) throw new Error(`Scan proposes ${missingSales.length} additions, above the configured safety limit`);
       const configuredMint = new Map(mintCollections.map(c => [c.contractAddress.toLowerCase(), c]));
       const additions = new Set(), initializations = [];
-      const next = structuredClone(previous), proposals = { addSales: [], addMint: [], retireMint: [], reactivateMint: [], needsReview: [] };
+      const next = structuredClone(previous), proposals = { addSales: [], addMint: [], retireMint: [], reactivateMint: [], reviewedClosed: [], needsReview: [] };
       for (const p of catalog) {
         const old = previous.entries[p.address] || {}, entry = next.entries[p.address] = { ...old };
         const known = currentMint.get(p.address);
@@ -167,6 +248,44 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
         entry.supplySignature = signature;
         if (supplyChanged) { entry.soldOutSince = null; entry.retireAtBlock = null; }
         const apply = options.mode === "apply";
+        // Only explicitly reviewed legacy collections may stay sales-only without replaying
+        // their old mint/auction history. New sellouts still take the normal backfill path.
+        if (reviewedClosed.has(p.address) && !known && !old.mintAdded && !configuredMint.has(p.address)) {
+          const review = reviewedClosed.get(p.address);
+          if (!old.reviewedReopenSeen && !p.minting && p.soldOut && currentSales.has(p.address) && review.supplySignature === signature && review.auctionSupply === p.auctionSupply) {
+            await validate(provider, p, safeHead);
+            if (await soldOut(provider, p, safeHead, true)) proposals.reviewedClosed.push(p.name);
+            else proposals.needsReview.push(`${p.name}: reviewed closed supply no longer confirmed on chain`);
+          } else {
+            entry.reviewedReopenSeen = true;
+            if (p.hasAuctions || collection.isAuction) entry.reviewedAuctionSeen = true;
+            const currentEditions = new Map(p.editions.map(e => [e.tokenId, e]));
+            const canResume = p.standard === "erc1155" && review.resumeAfterBlock !== undefined &&
+              review.resumeAfterBlock <= safeHead && !entry.reviewedAuctionSeen && currentSales.has(p.address) &&
+              (p.minting || signature !== review.supplySignature) &&
+              [...review.editions].every(([id, prior]) => currentEditions.has(id) && currentEditions.get(id).total >= prior.total && currentEditions.get(id).max >= prior.max);
+            if (!canResume) proposals.needsReview.push(`${p.name}: reviewed closed collection changed; mint monitoring needs review`);
+            else {
+              await validate(provider, p, safeHead);
+              // The reviewed cutoff is fixed, never advanced by daily scans. Newly listed
+              // IDs must have had no issued supply at that cutoff, even if already sold out now.
+              const baseline = { ...p, editions: p.editions.map(e => ({ ...e, max: review.editions.get(e.tokenId)?.total ?? 0 })) };
+              if (!await soldOut(provider, baseline, review.resumeAfterBlock, true)) {
+                proposals.needsReview.push(`${p.name}: reviewed resumption checkpoint does not match historical chain supply`);
+              } else {
+                proposals.reactivateMint.push(p.name); additions.add(p.address);
+                if (apply && options.autoAdd) {
+                  const startBlock = review.resumeAfterBlock + 1;
+                  initializations.push({ kind: "mint", collection: { ...collection, startBlock, discoveryCatchup: true } });
+                  entry.mintAdded = true; entry.mintStartBlock = startBlock; entry.retired = false;
+                  entry.reactivated = true; entry.pendingReactivation = false; entry.mintPaused = false;
+                  entry.reviewedReopenSeen = false; entry.soldOutSince = null; entry.retireAtBlock = null;
+                }
+              }
+            }
+          }
+          continue;
+        }
         const unknownAuction = p.hasAuctions && !collection.isAuction;
         if (unknownAuction) {
           proposals.needsReview.push(`${p.name}: auction configuration needs review`);
@@ -227,4 +346,4 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
   };
 }
 
-module.exports = { parseCatalog, fetchCatalog, validateStandard, confirmSoldOut, deploymentBlock, collectionFromProject, createCollectionRegistry };
+module.exports = { parseCatalog, fetchCatalog, validateStandard, confirmSoldOut, deploymentBlock, collectionFromProject, supplySignature, createCollectionRegistry };
