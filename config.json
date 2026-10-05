@@ -12,8 +12,8 @@
   },
   "collectionDiscovery": {
     "enabled": true,
-    "mode": "observe",
-    "autoAdd": false,
+    "mode": "apply",
+    "autoAdd": true,
     "autoRetire": false,
     "timeZone": "America/Vancouver",
     "hour": 23,
