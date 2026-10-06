@@ -14,7 +14,7 @@
     "enabled": true,
     "mode": "apply",
     "autoAdd": true,
-    "autoRetire": false,
+    "autoRetire": true,
     "timeZone": "America/Vancouver",
     "hour": 23,
     "minute": 0,

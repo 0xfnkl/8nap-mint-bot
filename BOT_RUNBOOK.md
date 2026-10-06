@@ -12,7 +12,7 @@ Use it to:
 
 This is not the full architecture history. That belongs in `8NAP_BOT_Handoff.md`.
 
-Daily spreadsheet sync and collection discovery have a separate setup and staged activation guide in [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md). Production Sheet writes were activated and verified on October 4. The October 5 collection configuration enables automatic additions and reviewed ERC-1155 reopening at the 23:00 scan. Automatic retirement stays disabled until its separate sold-out observation and cursor checks pass. See the rollout guide for preflight and scheduled-run verification. Railway uses its own service-account credential and workbook permissions.
+Daily spreadsheet sync and collection discovery have a separate setup and staged activation guide in [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md). Production Sheet writes were activated and verified on October 4. The October 5 configuration enables automatic additions and reviewed ERC-1155 reopening at the 23:00 scan; its first scheduled scan passed. The October 6 configuration also enables automatic mint retirement, subject to repeated sold-out observations, confirmed chain supply, completed mint catch-up and no pending auction settlements. Retirement preserves sales monitoring, history and cursors. See the rollout guide for preflight and scheduled-run verification. Railway uses its own service-account credential and workbook permissions.
 
 ---
 
