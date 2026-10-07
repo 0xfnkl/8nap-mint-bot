@@ -315,6 +315,6 @@ Update this runbook only when operational truth changes, such as:
 - startup health signals change materially
 - sales or mint polling lifecycle changes materially
 
-### Prepared reporting setup extension (October 6)
+### Reporting setup activation (October 7)
 
-Automatic collection/edition setup is implemented behind `sheetSync.reportingSetup: false`, with validation-only verification completed. It is not enabled in production. See [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md#reporting-setup-automation--prepared-october-6-not-enabled) for policies, journal recovery, boundaries, and the required website-first activation order. Include `reporting_setup-<spreadsheetId>.json` in private state backups if enabled.
+The October 7 configuration enables `sheetSync.reportingSetup` after the compatible website/updater release, independent implementation review, owner-only workbook backup and fresh production dry run. The first scheduled setup/import and morning website refresh remain acceptance checks. See [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md#reporting-setup-automation--october-7-activation) for policies, journal recovery, boundaries, and activation order. Include `/data/state/reporting_setup-<spreadsheetId>.json` in private state backups. Disabling this flag stops future metadata writes while preserving existing metadata, audit, import and monitoring state.

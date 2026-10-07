@@ -9,7 +9,7 @@
     "hour": 23,
     "minute": 30,
     "maxRows": 12000,
-    "reportingSetup": false
+    "reportingSetup": true
   },
   "collectionDiscovery": {
     "enabled": true,
