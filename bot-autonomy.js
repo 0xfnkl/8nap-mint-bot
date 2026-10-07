@@ -4,6 +4,7 @@ const path = require("path");
 const { createDailyJob, localSchedule } = require("./daily-jobs");
 const { SheetsClient, sheetStatePaths, syncMintSheet } = require("./sheets-sync");
 const { createCollectionRegistry } = require("./collection-discovery");
+const { syncReportingSetup } = require("./reporting-setup");
 
 function settings(value, defaults, modes) {
   const options = { ...defaults, ...value };
@@ -33,7 +34,12 @@ function createBotAutonomy({ config, stateDir, ledger, provider, confirmations, 
       try { credentials = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}"); } catch { throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON"); }
       const client = new SheetsClient({ spreadsheetId: options.spreadsheetId, credentials });
       const paths = sheetStatePaths(stateDir, options.spreadsheetId);
-      jobs.push(createDailyJob({ name: "mint sheet sync", file: paths.jobFile, timeZone: options.timeZone, hour: options.hour, minute: options.minute, alert, log, run: date => syncMintSheet({ client, records: ledger.read(), stateFile: paths.stateFile, maxRows: options.maxRows, dryRun: options.mode !== "apply", now: date }) }));
+      if (options.reportingSetup !== undefined && typeof options.reportingSetup !== "boolean") throw new Error("Invalid reportingSetup option");
+      jobs.push(createDailyJob({ name: "mint sheet sync", file: paths.jobFile, timeZone: options.timeZone, hour: options.hour, minute: options.minute, alert, log, run: async date => {
+        const setup = options.reportingSetup ? await syncReportingSetup({ client, snapshot: registry?.status(), stateFile: path.join(stateDir, `reporting_setup-${options.spreadsheetId}.json`), dryRun: options.mode !== "apply", now: date }) : null;
+        const result = await syncMintSheet({ client, records: ledger.read(), stateFile: paths.stateFile, maxRows: options.maxRows, dryRun: options.mode !== "apply", now: date });
+        return setup ? { ...result, reportingSetup: setup, needsReview: [...setup.needsReview, ...result.needsReview] } : result;
+      } }));
     }
   } catch (e) { errors.push(`Sheet sync disabled: ${e.message}`); }
   let timer;

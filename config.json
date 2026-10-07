@@ -8,7 +8,8 @@
     "timeZone": "America/Vancouver",
     "hour": 23,
     "minute": 30,
-    "maxRows": 12000
+    "maxRows": 12000,
+    "reportingSetup": false
   },
   "collectionDiscovery": {
     "enabled": true,

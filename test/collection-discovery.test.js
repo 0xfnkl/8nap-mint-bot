@@ -588,3 +588,38 @@ for (const change of [{ mode: "observe" }, { enabled: false }, { autoAdd: false,
     assert.equal(f.initialized.filter(([kind]) => kind === "sales").length, 1);
   });
 }
+
+test('successful discovery caches optional reporting metadata only for eligible mint coverage',async t=>{
+ const p=project({mintpass_timestamp:1791331200,allowlist_timestamp:1791338400,public_timestamp:1791352800});
+ const f=fixture(t,[p,project({project_address:B,project_identifier:'unreviewed-auction',supply_left_for_auction:2})]);
+ const when=new Date('2026-10-06T23:00:00Z');await f.registry.scan(when);
+ const state=f.registry.status();assert.deepEqual(state.reportingCatalog.map(p=>p.address),[A]);assert.equal(state.reportingCatalog[0].reporting.public,1791352800);
+ f.setHead(new Error('RPC unavailable'));await assert.rejects(f.registry.scan(new Date('2026-10-07T23:00:00Z')),/Ethereum head read failed/);
+ assert.deepEqual(f.registry.status().reportingCatalog,state.reportingCatalog);assert.equal(f.registry.status().lastScan,when.toISOString());
+});
+test('missing or malformed publishing dates do not disable mint discovery',()=>{
+ const parsed=parseCatalog(html([project({public_timestamp:'unpublished'})]));
+ assert.equal(parsed[0].reporting.public,null);assert.equal(parsed[0].reporting.pass,0);assert.equal(parsed[0].standard,'erc721');
+});
+
+test('duplicate optional publication dates do not stop discovery and remain quarantined across further copies',async t=>{
+ const dated=project({public_timestamp:1791352800});
+ for(const records of [[dated,project(),dated],[project(),dated,project()]]) {
+  const f=fixture(t,records);const result=await f.registry.scan();
+  assert.deepEqual(result.addMint,['Example']);assert.deepEqual(result.addSales,['Example']);assert.equal(result.collections,1);
+  assert.equal(f.registry.status().reportingCatalog[0].reportingConflict,true);assert.equal(f.registry.mintCollections().length,1);
+  assert.equal(f.restart().status().reportingCatalog[0].reportingConflict,true);
+ }
+});
+test('duplicate edition reporting conflicts are isolated but conflicting mint supply still fails closed',()=>{
+ const a={...editionProject([[0,1,2]]),is_minting:1},b=structuredClone(a);a.sub_projects[0].name='First title';b.sub_projects[0].name='Conflicting title';
+ assert.equal(parseCatalog(html([a,b,a]))[0].reportingConflict,true);
+ assert.equal(parseCatalog(html([a,a]))[0].reportingConflict,undefined);
+ b.sub_projects[0].total_supply=2;assert.throws(()=>parseCatalog(html([a,b])),/conflicting contract entries/);
+});
+test('a rejected contract cannot inherit reporting eligibility from a reviewed collection with the same name',async t=>{
+ const closed=project({is_minting:0,total_supply:10}),unreviewed=project({project_address:B,project_identifier:'different-contract'});
+ const f=fixture(t,[closed,unreviewed],{sales:[salesOnly()],options:{reviewedClosedCollections:[closedReview(closed)],maxMintCatchupBlocks:1}});
+ const result=await f.registry.scan();assert.deepEqual(result.reviewedClosed,['Example']);assert.match(result.needsReview[0],/catch-up budget/);
+ assert.deepEqual(f.registry.status().reportingCatalog.map(p=>p.address),[A]);assert.equal(f.registry.mintCollections().length,0);assert.equal(f.registry.salesCollections().length,2);
+});

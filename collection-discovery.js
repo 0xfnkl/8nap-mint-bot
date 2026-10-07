@@ -24,7 +24,7 @@ function parseCatalog(html) {
       const standard = value.project_type === 3 ? "erc1155" : "erc721";
       const editions = value.sub_projects.filter(e => e.is_visible === 1).map(e => {
         if (!Number.isSafeInteger(e.token_id) || e.token_id < 0 || !Number.isSafeInteger(e.total_supply) || e.total_supply < 0 || !Number.isSafeInteger(e.max_supply) || e.max_supply < 1 || e.total_supply > e.max_supply) throw new Error("Collections page contains invalid edition supply");
-        return { tokenId: String(e.token_id), total: e.total_supply, max: e.max_supply };
+        return { tokenId: String(e.token_id), total: e.total_supply, max: e.max_supply, reporting: reportingFields(e) };
       });
       if (new Set(editions.map(e => e.tokenId)).size !== editions.length) throw new Error("Collections page contains duplicate edition IDs");
       let total = value.total_supply, max = value.max_supply;
@@ -33,9 +33,15 @@ function parseCatalog(html) {
       if (value.is_minting === 0 && !soldOut) throw new Error(`Minting status and supply disagree for ${value.name}`);
       const auctionSupply = value.supply_left_for_auction ?? 0;
       if (!Number.isSafeInteger(auctionSupply) || auctionSupply < 0) throw new Error("Collections page contains invalid auction supply");
-      const project = { address, name: value.name.trim(), artist: String(value.full_name || "Unknown").trim(), standard, minting: value.is_minting === 1, soldOut, total, max, editions, projectId: value.project_id, slug: value.project_identifier, auctionSupply, hasAuctions: auctionSupply > 0 };
+      const project = { address, name: value.name.trim(), artist: String(value.full_name || "Unknown").trim(), standard, minting: value.is_minting === 1, soldOut, total, max, editions, projectId: value.project_id, slug: value.project_identifier, auctionSupply, hasAuctions: auctionSupply > 0, reporting: reportingFields(value) };
       const prior = projects.get(address);
-      if (prior && JSON.stringify(prior) !== JSON.stringify(project)) throw new Error("Collections page has conflicting contract entries");
+      if (prior) {
+        // Optional publication metadata cannot stop mint monitoring. Keep the
+        // pre-reporting mint validation, and quarantine conflicting reporting
+        // metadata for the setup planner instead of choosing either version.
+        if (JSON.stringify(mintCatalogFields(prior)) !== JSON.stringify(mintCatalogFields(project))) throw new Error("Collections page has conflicting contract entries");
+        if (prior.reportingConflict || JSON.stringify(reportingCatalogFields(prior)) !== JSON.stringify(reportingCatalogFields(project))) project.reportingConflict = true;
+      }
       projects.set(address, project);
     }
     for (const child of Object.values(value)) walk(child, depth + 1);
@@ -54,6 +60,22 @@ function parseCatalog(html) {
     if (!html.includes(`href="${route}"`)) throw new Error("Collection data and visible cards disagree");
   }
   return [...projects.values()];
+}
+
+function mintCatalogFields({ reporting, reportingConflict, editions, ...project }) {
+  return { ...project, editions: editions.map(({ reporting, ...edition }) => edition) };
+}
+
+function reportingCatalogFields(project) {
+  return { reporting: project.reporting, editions: project.editions.map(e => ({ tokenId: e.tokenId, reporting: e.reporting })) };
+}
+
+// Reporting metadata is optional and never makes the mint scanner depend on a
+// publishing schedule being present. The reporting planner validates it separately.
+function reportingFields(value) {
+  const text = v => typeof v === "string" && v.trim().length <= 500 ? v.trim() : null;
+  const stamp = v => v == null ? 0 : Number.isSafeInteger(v) && v >= 0 ? v : null;
+  return { name: text(value.name), artist: text(value.full_name), pass: stamp(value.mintpass_timestamp), allow: stamp(value.allowlist_timestamp), public: stamp(value.public_timestamp) };
 }
 
 async function fetchCatalog(fetchImpl = fetch) {
@@ -236,7 +258,7 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
       const missingSales = catalog.filter(p => !currentSales.has(p.address));
       if (missingSales.length > options.maxAdditionsPerScan) throw new Error(`Scan proposes ${missingSales.length} additions, above the configured safety limit`);
       const configuredMint = new Map(mintCollections.map(c => [c.contractAddress.toLowerCase(), c]));
-      const additions = new Set(), initializations = [];
+      const additions = new Set(), reportingClosed = new Set(), initializations = [];
       const next = structuredClone(previous), proposals = { addSales: [], addMint: [], retireMint: [], reactivateMint: [], reviewedClosed: [], needsReview: [] };
       for (const p of catalog) {
         const old = previous.entries[p.address] || {}, entry = next.entries[p.address] = { ...old };
@@ -254,7 +276,7 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
           const review = reviewedClosed.get(p.address);
           if (!old.reviewedReopenSeen && !p.minting && p.soldOut && currentSales.has(p.address) && review.supplySignature === signature && review.auctionSupply === p.auctionSupply) {
             await validate(provider, p, safeHead);
-            if (await soldOut(provider, p, safeHead, true)) proposals.reviewedClosed.push(p.name);
+            if (await soldOut(provider, p, safeHead, true)) { proposals.reviewedClosed.push(p.name); reportingClosed.add(p.address); }
             else proposals.needsReview.push(`${p.name}: reviewed closed supply no longer confirmed on chain`);
           } else {
             entry.reviewedReopenSeen = true;
@@ -338,6 +360,9 @@ function createCollectionRegistry({ file, options, mintCollections, salesCollect
         else await initializeSales(operation.collection);
       }
       next.version = 1; next.observed = [...addresses]; next.lastScanBlock = safeHead; next.lastScan = now.toISOString(); next.proposals = proposals;
+      // Reuse this successful daily website read for reporting; no second scraper
+      // or per-minute metadata calls. Failed scans never publish a fresh catalog.
+      next.reportingCatalog = catalog.filter(p => configuredMint.has(p.address) || next.entries[p.address]?.mintAdded || reportingClosed.has(p.address));
       // Observation records never imply applied additions/removals. Existing manual metadata wins.
       writeJson(file, next);
       cached = next;
