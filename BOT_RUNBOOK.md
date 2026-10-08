@@ -14,6 +14,10 @@ This is not the full architecture history. That belongs in `8NAP_BOT_Handoff.md`
 
 Daily spreadsheet sync and collection discovery have a separate setup and staged activation guide in [AUTOMATION_ROLLOUT.md](AUTOMATION_ROLLOUT.md). Production Sheet writes were activated and verified on October 4. The October 5 configuration enables automatic additions and reviewed ERC-1155 reopening at the 23:00 scan; its first scheduled scan passed. The October 6 configuration also enables automatic mint retirement, subject to repeated sold-out observations, confirmed chain supply, completed mint catch-up and no pending auction settlements. Retirement preserves sales monitoring, history and cursors. See the rollout guide for preflight and scheduled-run verification. Railway uses its own service-account credential and workbook permissions.
 
+The October 8 private-backup implementation passed independent review and remains undeployed and disabled (`privateBackup.enabled: false`). Its proposed 00:45 Vancouver job captures ledger/state files, preserves pending journals, and uploads one verified archive into three rotating, owner-created Google Drive files. Activation needs the Drive API, the existing service account's limited backup-file grants and `PRIVATE_BACKUP_SLOTS_JSON`; it does not need a new bot credential or paid Railway upgrade. The owner provisions seven daily, four weekly and three monthly files, with editor resharing disabled. Never substitute arbitrary Drive file IDs. Detailed setup, scope and recovery instructions live in the private system repository's `operations/recovery/README.md` at `/Users/jessefinkle/Documents/ChatGPT/8NAP Web/operations/recovery/README.md`.
+
+`scripts/restore-private-backup.js` is an offline recovery tool. It validates a downloaded archive and writes only into a new directory outside live bot data. A successful drill is not permission to roll back production cursors or start a second bot. Keep credentials, actual archives and private evidence outside Git.
+
 ---
 
 ## Core Principles

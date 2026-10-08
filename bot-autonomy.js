@@ -5,6 +5,7 @@ const { createDailyJob, localSchedule } = require("./daily-jobs");
 const { SheetsClient, sheetStatePaths, syncMintSheet } = require("./sheets-sync");
 const { createCollectionRegistry } = require("./collection-discovery");
 const { syncReportingSetup } = require("./reporting-setup");
+const { DriveBackupClient, backupBot } = require("./private-backup");
 
 function settings(value, defaults, modes) {
   const options = { ...defaults, ...value };
@@ -42,6 +43,18 @@ function createBotAutonomy({ config, stateDir, ledger, provider, confirmations, 
       } }));
     }
   } catch (e) { errors.push(`Sheet sync disabled: ${e.message}`); }
+  try {
+    const options = settings(config.privateBackup, { enabled: false, mode: "apply", timeZone: "America/Vancouver", hour: 0, minute: 45 }, ["apply"]);
+    if (options.enabled) {
+      if (options.timeZone !== "America/Vancouver") throw new Error("Private backup rotation requires America/Vancouver");
+      let credentials, slots;
+      try { credentials = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}"); slots = JSON.parse(env.PRIVATE_BACKUP_SLOTS_JSON || "{}"); }
+      catch { throw new Error("Private backup configuration is invalid JSON"); }
+      const client = new DriveBackupClient({ credentials, slots });
+      jobs.push(createDailyJob({ name: "private bot backup", file: path.join(stateDir, "private_backup_job.json"), timeZone: options.timeZone, hour: options.hour, minute: options.minute, alert, log,
+        run: now => backupBot({ client, dataDir: path.dirname(stateDir), now, commit: env.RAILWAY_GIT_COMMIT_SHA || "unknown" }) }));
+    }
+  } catch (e) { errors.push(`Private backup disabled: ${e.message}`); }
   let timer;
   let startupAlertSent = false;
   const stateAlerts = new Map();
@@ -50,7 +63,7 @@ function createBotAutonomy({ config, stateDir, ledger, provider, confirmations, 
     salesCollections: () => registry ? registry.salesCollections() : [...(config.sales?.collections || [])],
     catchupBatches: collection => collection.discoveryCatchup ? discoveryOptions?.mintCatchupBatchesPerPoll || 1 : 1,
     status() {
-      return [...errors, ...(!config.sheetSync?.enabled ? ["mint sheet sync: disabled"] : []), ...(!config.collectionDiscovery?.enabled ? ["collection discovery: disabled"] : []), ...jobs.map(job => {
+      return [...errors, ...(!config.sheetSync?.enabled ? ["mint sheet sync: disabled"] : []), ...(!config.collectionDiscovery?.enabled ? ["collection discovery: disabled"] : []), ...(!config.privateBackup?.enabled ? ["private bot backup: disabled"] : []), ...jobs.map(job => {
         try {
           const st = job.status();
           const review = st.result?.needsReview || [];

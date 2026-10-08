@@ -1,6 +1,13 @@
 {
   "discordChannelId": "1445238979937964154",
   "auctionChannelId": "1445850576255451367",
+  "privateBackup": {
+    "enabled": false,
+    "mode": "apply",
+    "timeZone": "America/Vancouver",
+    "hour": 0,
+    "minute": 45
+  },
   "sheetSync": {
     "enabled": true,
     "mode": "apply",
