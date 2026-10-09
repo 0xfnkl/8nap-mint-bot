@@ -99,14 +99,20 @@ class DriveBackupClient {
     try { return await response.json(); } catch { throw new Error("Private backup storage returned an invalid response"); }
   }
   async verifySlot(target) {
-    const fields = "id,name,mimeType,trashed,parents,owners(emailAddress),permissionIds,writersCanShare,capabilities(canEdit,canShare),properties,size,md5Checksum";
+    const fields = "id,name,mimeType,trashed,parents,owners(emailAddress),writersCanShare,capabilities(canEdit,canShare),properties,size,md5Checksum";
     const file = await this.request(`https://www.googleapis.com/drive/v3/files/${target.id}?fields=${encodeURIComponent(fields)}`);
-    requireThat(file.id === target.id && !file.trashed && file.mimeType === "application/gzip" && file.parents?.length === 1 && file.parents[0] === this.slots.folderId && file.name === `8nap-bot-${target.slot}.json.gz` && file.properties?.backupSource === SOURCE && file.properties?.slot === target.slot, "Backup slot identity changed; existing copies preserved");
+    // Drive omits parents when the file is shared without folder access. Exact
+    // owner-provisioned file IDs remain authoritative; the owner script checks
+    // folder membership. Reject a different parent whenever Drive exposes it.
+    requireThat(file.id === target.id && !file.trashed && file.mimeType === "application/gzip" && (file.parents === undefined || (file.parents.length === 1 && file.parents[0] === this.slots.folderId)) && file.name === `8nap-bot-${target.slot}.json.gz` && file.properties?.backupSource === SOURCE && file.properties?.slot === target.slot, "Backup slot identity changed; existing copies preserved");
     requireThat(file.owners?.length === 1 && file.owners[0].emailAddress === this.slots.ownerEmail, "Backup slot owner changed");
-    // Full permission details are hidden from writers who cannot reshare.
-    // Compare the exact owner-provisioned permission IDs instead.
-    const permissions = file.permissionIds || [];
-    requireThat(file.writersCanShare === false && file.capabilities?.canEdit === true && file.capabilities?.canShare === false && permissions.length === 2 && permissions.includes(this.slots.ownerPermissionId) && permissions.includes(this.slots.botPermissionId), "Backup slot sharing changed; upload paused");
+    // files.get also omits permissionIds for these My Drive files. The dedicated
+    // permissions API exposes their ACL without granting the bot resharing.
+    const access = await this.request(`https://www.googleapis.com/drive/v3/files/${target.id}/permissions?pageSize=100&fields=${encodeURIComponent("nextPageToken,permissions(id,type,role,emailAddress,deleted,pendingOwner)")}`);
+    const permissions = access.permissions || [];
+    const owner = p => p.id === this.slots.ownerPermissionId && p.type === "user" && p.role === "owner" && p.emailAddress === this.slots.ownerEmail && !p.deleted && !p.pendingOwner;
+    const bot = p => p.id === this.slots.botPermissionId && p.type === "user" && p.role === "writer" && p.emailAddress === this.email && !p.deleted && !p.pendingOwner;
+    requireThat(file.writersCanShare === false && file.capabilities?.canEdit === true && file.capabilities?.canShare === false && !access.nextPageToken && permissions.length === 2 && permissions.some(owner) && permissions.some(bot), "Backup slot sharing changed; upload paused");
     return file;
   }
   async upload(target, snapshot) {

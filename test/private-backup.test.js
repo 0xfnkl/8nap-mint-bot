@@ -11,7 +11,7 @@ function fixture(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'8nap-backup-
  createMintLedger(path.join(dir,'ledger')).append(row,Date.parse(row.DateUTC));return dir;}
 const slots=()=>({ownerEmail:'owner@example.com',ownerPermissionId:'owner-permission',botPermissionId:'bot-permission',folderId:'private-folder-123',daily:Array.from({length:7},(_,i)=>'daily-file-'+i),weekly:Array.from({length:4},(_,i)=>'weekly-file-'+i),monthly:Array.from({length:3},(_,i)=>'monthly-file-'+i)});
 const credentials={client_email:'bot@example.com',private_key:'synthetic'};
-function remote(target,s){return {id:target.id,name:`8nap-bot-${target.slot}.json.gz`,mimeType:'application/gzip',parents:[s.folderId],owners:[{emailAddress:s.ownerEmail}],permissionIds:[s.ownerPermissionId,s.botPermissionId],writersCanShare:false,capabilities:{canEdit:true,canShare:false},properties:{backupSource:SOURCE,slot:target.slot}};}
+function remote(target,s){return {id:target.id,name:`8nap-bot-${target.slot}.json.gz`,mimeType:'application/gzip',parents:[s.folderId],owners:[{emailAddress:s.ownerEmail}],permissions:[{id:s.ownerPermissionId,type:"user",role:"owner",emailAddress:s.ownerEmail},{id:s.botPermissionId,type:"user",role:"writer",emailAddress:credentials.client_email}],writersCanShare:false,capabilities:{canEdit:true,canShare:false},properties:{backupSource:SOURCE,slot:target.slot}};}
 
 test('captures only restore inputs, preserves pending journals, rejects corrupt content and paths',t=>{
  const dir=fixture(t);fs.writeFileSync(path.join(dir,'.env'),'secret');fs.writeFileSync(path.join(dir,'state/cursor.json.tmp'),'secret');fs.mkdirSync(path.join(dir,'tmp'));fs.writeFileSync(path.join(dir,'tmp/export.csv'),'secret');
@@ -51,21 +51,41 @@ test('slot rotation retains periods across Vancouver midnight, Monday and year b
 });
 test('sharing or identity changes prevent any upload',async t=>{
  const s=slots(),target=selectedSlots(s,now)[0],snapshot=captureArchive(fixture(t),{now});
- for(const change of [f=>f.permissionIds.push('anyoneWithLink'),f=>f.writersCanShare=true,f=>f.capabilities.canShare=true,f=>f.name='unrelated.gz',f=>f.parents=['other'],f=>f.owners=[]]){
-  const f=remote(target,s);change(f);let writes=0;const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async(_url,o)=>{if(o.method==='PATCH')writes++;return Response.json(f);}});
+ for(const change of [f=>f.permissions.push({id:'anyoneWithLink',type:'anyone',role:'reader'}),f=>f.permissions[1].emailAddress='other@example.com',f=>f.permissions[1].role='reader',f=>f.permissions[1].id='different-bot-id',f=>f.permissions[0].pendingOwner=true,f=>f.writersCanShare=true,f=>f.capabilities.canShare=true,f=>f.name='unrelated.gz',f=>f.parents=['other'],f=>f.owners=[]]){
+  const f=remote(target,s);change(f);let writes=0;const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async(_url,o)=>{if(o.method==='PATCH')writes++;return Response.json(_url.includes("/permissions?")?{permissions:f.permissions}:f);}});
   await assert.rejects(client.upload(target,snapshot));assert.equal(writes,0);
  }
 });
 test('lost upload response is reconciled by stored checksums without another overwrite',async t=>{
  const s=slots(),target=selectedSlots(s,now)[0],snapshot=captureArchive(fixture(t),{now});let f=remote(target,s),writes=0;
  const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async(_url,o)=>{
-  assert.equal(o.redirect,'error');if(o.method==='PATCH'){writes++;f={...f,properties:{...f.properties,sha256:snapshot.sha256,capturedAt:snapshot.capturedAt},size:String(snapshot.archive.length),md5Checksum:snapshot.md5};throw new Error('network response lost with sensitive body');}return Response.json(f);}});
+  assert.equal(o.redirect,'error');if(o.method==='PATCH'){writes++;f={...f,properties:{...f.properties,sha256:snapshot.sha256,capturedAt:snapshot.capturedAt},size:String(snapshot.archive.length),md5Checksum:snapshot.md5};throw new Error('network response lost with sensitive body');}return Response.json(_url.includes("/permissions?")?{permissions:f.permissions}:f);}});
  await assert.rejects(client.upload(target,snapshot),e=>!e.message.includes('sensitive'));
  await client.upload(target,snapshot);assert.equal(writes,1);
 });
+test('restricted My Drive metadata is accepted only with a complete private ACL',async t=>{
+ const s=slots(),target=selectedSlots(s,now)[0],snapshot=captureArchive(fixture(t),{now});
+ const f=remote(target,s);delete f.parents;
+ Object.assign(f,{md5Checksum:snapshot.md5,properties:{...f.properties,sha256:snapshot.sha256,capturedAt:snapshot.capturedAt}});
+ for(const access of [{permissions:f.permissions},{permissions:f.permissions,nextPageToken:'more'},{}]){
+  let reads=0,writes=0;
+  const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async(url,o)=>{
+   if(o.method==='PATCH')writes++;
+   if(url.includes('/permissions?')){reads++;return Response.json(access);}
+   return Response.json(f);
+  }});
+  if(access.permissions&&!access.nextPageToken)await client.upload(target,snapshot);
+  else await assert.rejects(client.upload(target,snapshot),/sharing changed/);
+  assert.equal(reads,1);assert.equal(writes,0);
+ }
+ const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async(url,o)=>{
+  assert.notEqual(o.method,'PATCH');return url.includes('/permissions?')?new Response('{}',{status:403}):Response.json(f);
+ }});
+ await assert.rejects(client.upload(target,snapshot),/HTTP 403/);
+});
 test('a corrupt remote write is not acknowledged as a successful backup',async t=>{
  const s=slots(),target=selectedSlots(s,now)[0],snapshot=captureArchive(fixture(t),{now});const f=remote(target,s);
- const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async()=>Response.json(f)});
+ const client=new DriveBackupClient({credentials,slots:s,getToken:async()=>'secret',fetchImpl:async(url)=>Response.json(url.includes("/permissions?")?{permissions:f.permissions}:f)});
  await assert.rejects(client.upload(target,snapshot),/readback/);
 });
 test('successful upload sends the exact archive and confirms content plus metadata',async t=>{
@@ -74,7 +94,7 @@ test('successful upload sends the exact archive and confirms content plus metada
   assert.ok(url.startsWith('https://www.googleapis.com/'));assert.equal(o.headers.Authorization,'Bearer secret');
   if(o.method==='PATCH'){writes++;const start=o.body.indexOf(Buffer.from('Content-Type: application/gzip\r\n\r\n'))+'Content-Type: application/gzip\r\n\r\n'.length;assert.deepEqual(o.body.subarray(start,start+snapshot.archive.length),snapshot.archive);
    f={...f,properties:{...f.properties,sha256:snapshot.sha256,capturedAt:snapshot.capturedAt},size:String(snapshot.archive.length),md5Checksum:snapshot.md5};return Response.json({id:f.id});}
-  return Response.json(f);
+  return Response.json(url.includes("/permissions?")?{permissions:f.permissions}:f);
  }});await client.upload(target,snapshot);assert.equal(writes,1);
 });
 test('offline restore refuses existing destinations and symlink paths into active data',t=>{
